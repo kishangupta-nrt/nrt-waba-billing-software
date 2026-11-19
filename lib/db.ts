@@ -1,6 +1,11 @@
 import { Client, CompanySettings, Invoice, MonthlyCreditUsage } from './types';
 import { defaultCompanySettings, initialClients, initialInvoices, initialMonthlyUsage } from './mockData';
 import { getSupabase } from './supabase';
+import { 
+  generateNextUniquePiNumber, 
+  generateBatchUniquePiNumbers, 
+  extractSequenceNumber 
+} from './piNumberUtils';
 
 const CLIENTS_KEY = 'waba_clients';
 const INVOICES_KEY = 'waba_invoices';
@@ -58,17 +63,41 @@ export const db = {
     }
   },
 
-  async getNextVoucherNo(): Promise<string> {
+  async getNextVoucherNo(invoiceDate?: string): Promise<string> {
     const settings = await this.getSettings();
-    const nextSeq = (settings.current_voucher_seq || 242) + 1;
-    const prefix = settings.voucher_prefix || 'NRT/PI/26-27/';
-    const padded = String(nextSeq).padStart(5, '0');
-    
-    // Update seq
-    const updated = { ...settings, current_voucher_seq: nextSeq };
-    await this.saveSettings(updated);
-    
-    return `${prefix}${padded}`;
+    const invoices = await this.getInvoices();
+    const nextPi = generateNextUniquePiNumber(
+      invoices,
+      settings.voucher_prefix || 'NRT/PI/26-27/',
+      invoiceDate,
+      settings.current_voucher_seq || 242
+    );
+    const seq = extractSequenceNumber(nextPi);
+    if (seq) {
+      await this.saveSettings({ ...settings, current_voucher_seq: seq });
+    }
+    return nextPi;
+  },
+
+  async getNextBatchVoucherNos(count: number, invoiceDate?: string): Promise<string[]> {
+    if (count <= 0) return [];
+    const settings = await this.getSettings();
+    const invoices = await this.getInvoices();
+    const batch = generateBatchUniquePiNumbers(
+      invoices,
+      count,
+      settings.voucher_prefix || 'NRT/PI/26-27/',
+      invoiceDate,
+      settings.current_voucher_seq || 242
+    );
+    const lastPi = batch[batch.length - 1];
+    if (lastPi) {
+      const seq = extractSequenceNumber(lastPi);
+      if (seq) {
+        await this.saveSettings({ ...settings, current_voucher_seq: seq });
+      }
+    }
+    return batch;
   },
 
   // Clients

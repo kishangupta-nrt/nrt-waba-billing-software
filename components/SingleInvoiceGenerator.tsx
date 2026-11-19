@@ -7,6 +7,10 @@ import { calculateInvoiceTotals, formatDateForDisplay, determineTaxMode, INDIAN_
 import { numberToIndianWords } from '@/lib/numberToWords';
 import { exportElementToPdf } from '@/lib/pdfGenerator';
 import { 
+  generateNextUniquePiNumber, 
+  isPiNumberUnique 
+} from '@/lib/piNumberUtils';
+import { 
   Printer, 
   Download, 
   Save, 
@@ -15,7 +19,8 @@ import {
   RefreshCw, 
   CheckCircle, 
   Sparkles,
-  Edit3
+  Edit3,
+  AlertCircle
 } from 'lucide-react';
 
 interface SingleInvoiceGeneratorProps {
@@ -24,6 +29,7 @@ interface SingleInvoiceGeneratorProps {
   onSaveInvoice: (invoice: Invoice) => Promise<void>;
   onClientAdded?: (client: Client) => void;
   initialInvoice?: Invoice | null;
+  existingInvoices?: Invoice[];
 }
 
 export const SingleInvoiceGenerator: React.FC<SingleInvoiceGeneratorProps> = ({
@@ -31,6 +37,7 @@ export const SingleInvoiceGenerator: React.FC<SingleInvoiceGeneratorProps> = ({
   companySettings,
   onSaveInvoice,
   initialInvoice,
+  existingInvoices = [],
 }) => {
   // Form State
   const [selectedClientId, setSelectedClientId] = useState<string>('client_1');
@@ -40,11 +47,23 @@ export const SingleInvoiceGenerator: React.FC<SingleInvoiceGeneratorProps> = ({
   const [buyerStateCode, setBuyerStateCode] = useState<string>('23');
   const [buyerGstin, setBuyerGstin] = useState<string>('');
   
-  const [voucherNo, setVoucherNo] = useState<string>('NRT/PI/26-27/00242');
-  const [invoiceType, setInvoiceType] = useState<'Proforma Invoice' | 'Tax Invoice'>('Proforma Invoice');
   const [invoiceDate, setInvoiceDate] = useState<string>('2026-11-02');
   const [dueDate, setDueDate] = useState<string>('2026-11-02');
-  const [buyerOrderNo, setBuyerOrderNo] = useState<string>('NRT/PI/26-27/00242');
+  
+  // Auto-generate unique PI Number on initialization
+  const [voucherNo, setVoucherNo] = useState<string>(() => {
+    if (initialInvoice?.voucher_no) return initialInvoice.voucher_no;
+    return generateNextUniquePiNumber(
+      existingInvoices,
+      companySettings.voucher_prefix || 'NRT/PI/',
+      '2026-11-02',
+      companySettings.current_voucher_seq || 242
+    );
+  });
+  const [invoiceType, setInvoiceType] = useState<'Proforma Invoice' | 'Tax Invoice'>('Proforma Invoice');
+  const [buyerOrderNo, setBuyerOrderNo] = useState<string>(() => {
+    return voucherNo;
+  });
   const [otherReferences, setOtherReferences] = useState<string>('Health Clinic');
   const [modeTerms, setModeTerms] = useState<string>('');
   const [dispatchedThrough, setDispatchedThrough] = useState<string>('');
@@ -74,7 +93,7 @@ export const SingleInvoiceGenerator: React.FC<SingleInvoiceGeneratorProps> = ({
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
 
-  // Initialize from initialInvoice if provided
+  // Initialize from initialInvoice if provided, or generate unique PI Number
   useEffect(() => {
     if (initialInvoice) {
       setVoucherNo(initialInvoice.voucher_no);
@@ -97,8 +116,18 @@ export const SingleInvoiceGenerator: React.FC<SingleInvoiceGeneratorProps> = ({
       if (initialInvoice.items && initialInvoice.items.length > 0) {
         setItems(initialInvoice.items);
       }
+    } else {
+      // For a new invoice, verify if current voucherNo collides with any existing invoice
+      const uniquePi = generateNextUniquePiNumber(
+        existingInvoices,
+        companySettings.voucher_prefix || 'NRT/PI/',
+        invoiceDate,
+        companySettings.current_voucher_seq || 242
+      );
+      setVoucherNo(uniquePi);
+      setBuyerOrderNo(uniquePi);
     }
-  }, [initialInvoice]);
+  }, [initialInvoice, existingInvoices, companySettings.voucher_prefix, companySettings.current_voucher_seq]);
 
   // Handle Client Selection Change
   const handleClientSelect = (clientId: string) => {
@@ -260,17 +289,29 @@ export const SingleInvoiceGenerator: React.FC<SingleInvoiceGeneratorProps> = ({
     setItems(prev => prev.filter((_, i) => i !== index).map((it, idx) => ({ ...it, sl_no: idx + 1 })));
   };
 
-  // Generate Next Voucher No
+  // Validate uniqueness of current PI / Voucher Number
+  const isUnique = useMemo(() => {
+    return isPiNumberUnique(voucherNo, existingInvoices, initialInvoice?.id);
+  }, [voucherNo, existingInvoices, initialInvoice?.id]);
+
+  // Generate Next Unique PI Number
   const handleNewVoucherNo = () => {
-    const nextSeq = (companySettings.current_voucher_seq || 242) + 1;
-    const padded = String(nextSeq).padStart(5, '0');
-    const newVoucher = `${companySettings.voucher_prefix || 'NRT/PI/26-27/'}${padded}`;
-    setVoucherNo(newVoucher);
-    setBuyerOrderNo(newVoucher);
+    const nextUnique = generateNextUniquePiNumber(
+      existingInvoices,
+      companySettings.voucher_prefix || 'NRT/PI/',
+      invoiceDate,
+      companySettings.current_voucher_seq || 242
+    );
+    setVoucherNo(nextUnique);
+    setBuyerOrderNo(nextUnique);
   };
 
-  // Save Invoice
+  // Save Invoice with Uniqueness Validation
   const handleSave = async () => {
+    if (!isUnique) {
+      alert(`PI Number "${voucherNo}" is already in use by another invoice. Please click "Auto-Gen Unique" to assign a new unique PI Number before saving.`);
+      return;
+    }
     setIsSaving(true);
     try {
       await onSaveInvoice(liveInvoice);
@@ -312,9 +353,10 @@ export const SingleInvoiceGenerator: React.FC<SingleInvoiceGeneratorProps> = ({
             <button
               onClick={handleNewVoucherNo}
               className="text-xs text-orange-600 hover:text-orange-700 font-semibold flex items-center gap-1 bg-orange-50 hover:bg-orange-100 px-2.5 py-1 rounded-md transition-colors"
+              title="Automatically calculate and assign next unique sequential PI Number"
             >
               <RefreshCw className="w-3 h-3" />
-              Next Voucher No.
+              Auto-Gen Unique PI No.
             </button>
           </div>
 
@@ -429,10 +471,32 @@ export const SingleInvoiceGenerator: React.FC<SingleInvoiceGeneratorProps> = ({
           </h2>
 
           <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
-                Voucher No.
-              </label>
+            <div className="col-span-2 sm:col-span-1">
+              <div className="flex items-center justify-between mb-0.5">
+                <label className="text-[11px] font-semibold text-slate-700 flex items-center gap-1.5">
+                  <span>PI Number (Voucher No.) *</span>
+                  {isUnique ? (
+                    <span className="text-[9.5px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded flex items-center gap-0.5">
+                      <CheckCircle className="w-2.5 h-2.5 text-emerald-500" />
+                      Unique
+                    </span>
+                  ) : (
+                    <span className="text-[9.5px] font-bold text-red-600 bg-red-50 border border-red-200 px-1.5 py-0.2 rounded flex items-center gap-0.5 animate-pulse">
+                      <AlertCircle className="w-2.5 h-2.5 text-red-500" />
+                      Duplicate
+                    </span>
+                  )}
+                </label>
+                <button
+                  type="button"
+                  onClick={handleNewVoucherNo}
+                  className="text-[10px] text-orange-600 hover:text-orange-700 font-bold flex items-center gap-0.5 bg-orange-50 hover:bg-orange-100 px-1.5 py-0.5 rounded transition-colors"
+                  title="Auto-calculate next unique sequential PI number"
+                >
+                  <RefreshCw className="w-2.5 h-2.5" />
+                  Auto-Gen
+                </button>
+              </div>
               <input
                 type="text"
                 value={voucherNo}
@@ -440,8 +504,24 @@ export const SingleInvoiceGenerator: React.FC<SingleInvoiceGeneratorProps> = ({
                   setVoucherNo(e.target.value);
                   setBuyerOrderNo(e.target.value);
                 }}
-                className="w-full text-xs rounded-lg border-slate-300 border p-2 font-mono font-bold text-orange-700 focus:ring-2 focus:ring-orange-500 focus:outline-none"
+                className={`w-full text-xs rounded-lg border p-2 font-mono font-bold focus:ring-2 focus:outline-none ${
+                  isUnique
+                    ? 'border-slate-300 text-orange-700 focus:ring-orange-500'
+                    : 'border-red-400 bg-red-50/50 text-red-700 focus:ring-red-500'
+                }`}
               />
+              {!isUnique && (
+                <div className="text-[10px] text-red-600 font-medium mt-1 flex items-center justify-between bg-red-50 p-1.5 rounded border border-red-200">
+                  <span>⚠️ This PI number already exists!</span>
+                  <button
+                    type="button"
+                    onClick={handleNewVoucherNo}
+                    className="underline font-bold hover:text-red-800 ml-1"
+                  >
+                    Auto-fix to Unique
+                  </button>
+                </div>
+              )}
             </div>
 
             <div>

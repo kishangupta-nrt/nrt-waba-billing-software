@@ -11,6 +11,7 @@ import { db } from '@/lib/db';
 import { getSupabase } from '@/lib/supabase';
 import { defaultCompanySettings } from '@/lib/mockData';
 import { Client, CompanySettings, Invoice, MonthlyCreditUsage } from '@/lib/types';
+import { generateNextUniquePiNumber } from '@/lib/piNumberUtils';
 import { Sparkles, Layers, FileText, ArrowRight, ShieldCheck } from 'lucide-react';
 
 export default function Home() {
@@ -141,17 +142,24 @@ export default function Home() {
   const handleGenerateInvoiceFromUsage = (usage: MonthlyCreditUsage) => {
     const client = clients.find(c => c.id === usage.client_id || c.name === usage.client_name);
     const itemAmount = Number((usage.total_credits * usage.rate_applied).toFixed(4));
+    const today = new Date().toISOString().slice(0, 10);
+    const uniqueVoucherNo = generateNextUniquePiNumber(
+      invoices,
+      companySettings.voucher_prefix || 'NRT/PI/',
+      today,
+      companySettings.current_voucher_seq || 242
+    );
     
     const draftInvoice: Invoice = {
       id: `inv_draft_${Date.now()}`,
-      voucher_no: `NRT/PI/26-27/${String((companySettings.current_voucher_seq || 242) + 1).padStart(5, '0')}`,
+      voucher_no: uniqueVoucherNo,
       invoice_type: 'Proforma Invoice',
-      invoice_date: new Date().toISOString().slice(0, 10),
+      invoice_date: today,
       buyer_name: usage.client_name,
       buyer_state_name: client?.state_name || 'Madhya Pradesh',
       buyer_state_code: client?.state_code || '23',
       buyer_gstin: client?.gstin || '',
-      buyer_order_no: `NRT/PI/26-27/${String((companySettings.current_voucher_seq || 242) + 1).padStart(5, '0')}`,
+      buyer_order_no: uniqueVoucherNo,
       other_references: client?.reference_category || 'Health Clinic',
       tax_mode: usage.tax_mode,
       items: [
@@ -255,6 +263,7 @@ export default function Home() {
             companySettings={companySettings}
             onSaveInvoice={handleSaveInvoice}
             initialInvoice={selectedInvoiceForEdit}
+            existingInvoices={invoices}
           />
         )}
 
@@ -263,6 +272,7 @@ export default function Home() {
             clients={clients}
             companySettings={companySettings}
             onSaveInvoicesBatch={handleSaveInvoicesBatch}
+            existingInvoices={invoices}
           />
         )}
 

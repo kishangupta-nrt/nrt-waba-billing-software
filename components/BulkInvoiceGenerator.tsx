@@ -8,6 +8,7 @@ import { InvoiceTemplate } from './InvoiceTemplate';
 import { calculateInvoiceTotals, formatDateForDisplay, determineTaxMode, INDIAN_STATES } from '@/lib/taxUtils';
 import { numberToIndianWords } from '@/lib/numberToWords';
 import { generatePdfBlob, exportElementToPdf } from '@/lib/pdfGenerator';
+import { generateBatchUniquePiNumbers } from '@/lib/piNumberUtils';
 import { 
   FileSpreadsheet, 
   Upload, 
@@ -27,12 +28,14 @@ interface BulkInvoiceGeneratorProps {
   clients: Client[];
   companySettings: CompanySettings;
   onSaveInvoicesBatch: (invoices: Invoice[]) => Promise<void>;
+  existingInvoices?: Invoice[];
 }
 
 export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
   clients,
   companySettings,
   onSaveInvoicesBatch,
+  existingInvoices = [],
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -71,6 +74,17 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
   const [previewInvoice, setPreviewInvoice] = useState<Invoice | null>(null);
   const [isZipping, setIsZipping] = useState<boolean>(false);
   const [zipProgress, setZipProgress] = useState<string>('');
+
+  // Pre-calculate live preview of unique PI Numbers for each row
+  const previewPiNumbers = React.useMemo(() => {
+    return generateBatchUniquePiNumbers(
+      existingInvoices,
+      rows.length,
+      companySettings.voucher_prefix || 'NRT/PI/',
+      invoiceDate,
+      companySettings.current_voucher_seq || 242
+    );
+  }, [existingInvoices, rows.length, companySettings.voucher_prefix, companySettings.current_voucher_seq, invoiceDate]);
 
   // Selection counts
   const selectedCount = rows.filter(r => r.selected).length;
@@ -234,15 +248,20 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
     setIsGenerating(true);
     try {
       const generated: Invoice[] = [];
-      let currentSeq = companySettings.current_voucher_seq || 242;
-      const prefix = companySettings.voucher_prefix || 'NRT/PI/26-27/';
       const formattedDate = formatDateForDisplay(invoiceDate);
+
+      // Generate strictly unique sequential PI numbers for the batch
+      const uniqueVouchers = generateBatchUniquePiNumbers(
+        existingInvoices,
+        selectedRows.length,
+        companySettings.voucher_prefix || 'NRT/PI/',
+        invoiceDate,
+        companySettings.current_voucher_seq || 242
+      );
 
       for (let i = 0; i < selectedRows.length; i++) {
         const row = selectedRows[i];
-        const nextSeq = currentSeq + i;
-        const padded = String(nextSeq).padStart(5, '0');
-        const voucherNo = `${prefix}${padded}`;
+        const voucherNo = uniqueVouchers[i];
 
         const itemAmount = Number((row.credits * row.rate).toFixed(4));
         const item = {

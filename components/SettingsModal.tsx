@@ -138,6 +138,25 @@ CREATE POLICY "Allow public all" ON company_settings FOR ALL USING (true) WITH C
 CREATE POLICY "Allow public all" ON clients FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow public all" ON invoices FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow public all" ON monthly_credit_usage FOR ALL USING (true) WITH CHECK (true);
+
+-- Ensure Unique PI Numbers & Auto Sequence Function
+CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_voucher_no_unique ON invoices (voucher_no);
+
+CREATE OR REPLACE FUNCTION get_next_unique_pi_number(p_prefix TEXT DEFAULT 'NRT/PI/26-27/')
+RETURNS TEXT LANGUAGE plpgsql AS $$
+DECLARE
+  v_seq INT;
+  v_next_pi TEXT;
+BEGIN
+  SELECT COALESCE(MAX(SUBSTRING(voucher_no FROM '[0-9]+$')::INT), 242) + 1
+  INTO v_seq
+  FROM invoices
+  WHERE voucher_no LIKE p_prefix || '%';
+
+  v_next_pi := p_prefix || LPAD(v_seq::TEXT, 5, '0');
+  RETURN v_next_pi;
+END;
+$$;
 `;
     navigator.clipboard.writeText(sqlText);
     setCopiedSql(true);

@@ -99,7 +99,7 @@ export interface Invoice {
 
 export interface MonthlyCreditUsage {
   id: string;
-  client_id: string;
+  client_id?: string | null;
   client_name: string;
   month: string; // e.g. "October"
   year: number; // 2026

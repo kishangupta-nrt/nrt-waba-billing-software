@@ -3,7 +3,7 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 let supabaseClient: SupabaseClient | null = null;
 
 export function getSupabaseCredentials(): { url: string; key: string } | null {
-  if (typeof window !== 'undefined') {
+  if (process.env.NODE_ENV !== 'production' && typeof window !== 'undefined') {
     const customUrl = localStorage.getItem('custom_supabase_url');
     const customKey = localStorage.getItem('custom_supabase_key');
     if (customUrl && customKey) {

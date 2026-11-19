@@ -127,6 +127,8 @@ export const SingleInvoiceGenerator: React.FC<SingleInvoiceGeneratorProps> = ({
       setVoucherNo(uniquePi);
       setBuyerOrderNo(uniquePi);
     }
+    // invoiceDate intentionally excluded to avoid resetting a manually edited voucher.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialInvoice, existingInvoices, companySettings.voucher_prefix, companySettings.current_voucher_seq]);
 
   // Handle Client Selection Change

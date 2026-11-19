@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: waba-billing-api
+    runtime: node
+    plan: starter
+    buildCommand: pnpm install --frozen-lockfile --prod=false && pnpm build:server
+    startCommand: pnpm start:server
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: AUTH_REQUIRED
+        value: "true"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false

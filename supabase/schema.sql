@@ -1,5 +1,6 @@
 -- SUPABASE SCHEMA FOR WABA BILLING SYSTEM
 -- Run this in your Supabase SQL Editor: https://supabase.com/dashboard/project/_/sql
+-- Keep public/schema.sql in sync (served to the Settings modal copy button).
 
 -- 1. Create company_settings table
 CREATE TABLE IF NOT EXISTS company_settings (
@@ -89,15 +90,15 @@ CREATE TABLE IF NOT EXISTS invoices (
 -- 4. Create monthly_credit_usage table
 CREATE TABLE IF NOT EXISTS monthly_credit_usage (
   id TEXT PRIMARY KEY,
-  client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  client_id TEXT REFERENCES clients(id) ON DELETE SET NULL,
   client_name TEXT NOT NULL,
   month TEXT NOT NULL,
   year INT NOT NULL,
-  utility_credits INT DEFAULT 0,
-  marketing_credits INT DEFAULT 0,
-  service_credits INT DEFAULT 0,
-  auth_credits INT DEFAULT 0,
-  total_credits INT NOT NULL,
+  utility_credits NUMERIC(12, 4) DEFAULT 0,
+  marketing_credits NUMERIC(12, 4) DEFAULT 0,
+  service_credits NUMERIC(12, 4) DEFAULT 0,
+  auth_credits NUMERIC(12, 4) DEFAULT 0,
+  total_credits NUMERIC(12, 4) NOT NULL,
   rate_applied NUMERIC(10, 4) NOT NULL DEFAULT 0.3650,
   billed_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
   tax_mode TEXT NOT NULL DEFAULT 'CGST_SGST' CHECK (tax_mode IN ('CGST_SGST', 'IGST')),
@@ -108,16 +109,18 @@ CREATE TABLE IF NOT EXISTS monthly_credit_usage (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Enable RLS and create permissive public access policies (for client app anon key)
+-- Enable RLS. Only authenticated users may access data directly.
 ALTER TABLE company_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE clients ENABLE ROW LEVEL SECURITY;
 ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE monthly_credit_usage ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Allow public read-write for company_settings" ON company_settings FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public read-write for clients" ON clients FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public read-write for invoices" ON invoices FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public read-write for monthly_credit_usage" ON monthly_credit_usage FOR ALL USING (true) WITH CHECK (true);
+-- Authenticated users only. The Render backend uses the service-role key and
+-- bypasses RLS; the browser should never read/write these tables directly.
+CREATE POLICY "Authenticated access to company_settings" ON company_settings FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "Authenticated access to clients" ON clients FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "Authenticated access to invoices" ON invoices FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "Authenticated access to monthly_credit_usage" ON monthly_credit_usage FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
 -- Insert Initial Company Settings
 INSERT INTO company_settings (id, company_name, gstin, state_name, state_code, pan, current_voucher_seq)
@@ -133,11 +136,17 @@ ON CONFLICT (id) DO NOTHING;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_voucher_no_unique ON invoices (voucher_no);
 
 CREATE OR REPLACE FUNCTION get_next_unique_pi_number(p_prefix TEXT DEFAULT 'NRT/PI/26-27/')
-RETURNS TEXT LANGUAGE plpgsql AS $$
+RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
 DECLARE
   v_seq INT;
   v_next_pi TEXT;
 BEGIN
+  PERFORM pg_advisory_xact_lock(hashtext('invoice_voucher:' || p_prefix));
+
   SELECT COALESCE(MAX(SUBSTRING(voucher_no FROM '[0-9]+$')::INT), 242) + 1
   INTO v_seq
   FROM invoices
@@ -147,3 +156,48 @@ BEGIN
   RETURN v_next_pi;
 END;
 $$;
+
+-- Assign a race-safe voucher number when the backend omits it.
+CREATE OR REPLACE FUNCTION assign_invoice_voucher_no()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_prefix TEXT;
+  v_seq INT;
+BEGIN
+  IF new.voucher_no IS NOT NULL AND btrim(new.voucher_no) <> '' THEN
+    RETURN new;
+  END IF;
+
+  SELECT COALESCE(voucher_prefix, 'NRT/PI/26-27/') INTO v_prefix
+  FROM company_settings WHERE id = 'primary';
+
+  IF v_prefix IS NULL OR btrim(v_prefix) = '' THEN
+    v_prefix := 'NRT/PI/26-27/';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext('invoice_voucher:' || v_prefix));
+
+  SELECT COALESCE(MAX(SUBSTRING(voucher_no FROM '[0-9]+$')::INT), 242) + 1
+  INTO v_seq
+  FROM invoices
+  WHERE voucher_no LIKE v_prefix || '%';
+
+  new.voucher_no := v_prefix || LPAD(v_seq::TEXT, 5, '0');
+
+  UPDATE company_settings
+  SET current_voucher_seq = GREATEST(COALESCE(current_voucher_seq, 0), v_seq),
+      updated_at = NOW()
+  WHERE id = 'primary';
+
+  RETURN new;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_assign_invoice_voucher_no ON invoices;
+CREATE TRIGGER trg_assign_invoice_voucher_no
+  BEFORE INSERT ON invoices
+  FOR EACH ROW EXECUTE FUNCTION assign_invoice_voucher_no();

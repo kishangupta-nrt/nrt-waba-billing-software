@@ -3,6 +3,8 @@
 import React, { useState } from 'react';
 import { CompanySettings } from '@/lib/types';
 import { resetSupabaseClient } from '@/lib/supabase';
+import { signOut } from '@/lib/auth';
+import { config } from '@/lib/config';
 import { 
   Building2, 
   CreditCard, 
@@ -77,90 +79,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  const handleCopySql = () => {
-    const sqlText = `-- WABA Billing System Schema
-CREATE TABLE IF NOT EXISTS company_settings (
-  id TEXT PRIMARY KEY DEFAULT 'primary',
-  company_name TEXT NOT NULL DEFAULT 'NEWRISE TECHNOSYS PVT LTD',
-  gstin TEXT NOT NULL DEFAULT '23AAECN8171A1ZT',
-  state_name TEXT NOT NULL DEFAULT 'Madhya Pradesh',
-  state_code TEXT NOT NULL DEFAULT '23',
-  pan TEXT NOT NULL DEFAULT 'AAECN8171A',
-  current_voucher_seq INT NOT NULL DEFAULT 242
-);
-
-CREATE TABLE IF NOT EXISTS clients (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  state_name TEXT NOT NULL DEFAULT 'Madhya Pradesh',
-  state_code TEXT NOT NULL DEFAULT '23',
-  gstin TEXT,
-  reference_category TEXT DEFAULT 'Health Clinic',
-  default_rate NUMERIC(10, 4) DEFAULT 0.3650,
-  default_tax_mode TEXT DEFAULT 'CGST_SGST'
-);
-
-CREATE TABLE IF NOT EXISTS invoices (
-  id TEXT PRIMARY KEY,
-  voucher_no TEXT UNIQUE NOT NULL,
-  invoice_type TEXT NOT NULL DEFAULT 'Proforma Invoice',
-  invoice_date DATE NOT NULL,
-  buyer_name TEXT NOT NULL,
-  buyer_state_name TEXT NOT NULL,
-  buyer_state_code TEXT NOT NULL,
-  tax_mode TEXT NOT NULL,
-  items JSONB NOT NULL DEFAULT '[]',
-  subtotal NUMERIC(12, 4) NOT NULL,
-  total_amount NUMERIC(12, 4) NOT NULL,
-  amount_in_words TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS monthly_credit_usage (
-  id TEXT PRIMARY KEY,
-  client_id TEXT NOT NULL,
-  client_name TEXT NOT NULL,
-  month TEXT NOT NULL,
-  year INT NOT NULL,
-  total_credits INT NOT NULL,
-  rate_applied NUMERIC(10, 4) NOT NULL DEFAULT 0.3650,
-  billed_amount NUMERIC(12, 2) NOT NULL,
-  tax_mode TEXT NOT NULL DEFAULT 'CGST_SGST',
-  billed BOOLEAN DEFAULT FALSE,
-  invoice_voucher_no TEXT
-);
-
-ALTER TABLE company_settings ENABLE ROW LEVEL SECURITY;
-ALTER TABLE clients ENABLE ROW LEVEL SECURITY;
-ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
-ALTER TABLE monthly_credit_usage ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Allow public all" ON company_settings FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public all" ON clients FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public all" ON invoices FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public all" ON monthly_credit_usage FOR ALL USING (true) WITH CHECK (true);
-
--- Ensure Unique PI Numbers & Auto Sequence Function
-CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_voucher_no_unique ON invoices (voucher_no);
-
-CREATE OR REPLACE FUNCTION get_next_unique_pi_number(p_prefix TEXT DEFAULT 'NRT/PI/26-27/')
-RETURNS TEXT LANGUAGE plpgsql AS $$
-DECLARE
-  v_seq INT;
-  v_next_pi TEXT;
-BEGIN
-  SELECT COALESCE(MAX(SUBSTRING(voucher_no FROM '[0-9]+$')::INT), 242) + 1
-  INTO v_seq
-  FROM invoices
-  WHERE voucher_no LIKE p_prefix || '%';
-
-  v_next_pi := p_prefix || LPAD(v_seq::TEXT, 5, '0');
-  RETURN v_next_pi;
-END;
-$$;
-`;
-    navigator.clipboard.writeText(sqlText);
-    setCopiedSql(true);
-    setTimeout(() => setCopiedSql(false), 3000);
+  const handleCopySql = async () => {
+    try {
+      const response = await fetch('/schema.sql');
+      if (!response.ok) throw new Error('Unable to load schema.sql');
+      const sqlText = await response.text();
+      await navigator.clipboard.writeText(sqlText);
+      setCopiedSql(true);
+      setTimeout(() => setCopiedSql(false), 3000);
+    } catch (error) {
+      console.error('Unable to copy schema:', error);
+    }
   };
 
   return (
@@ -474,44 +403,69 @@ $$;
                 </span>
               </div>
               <p className="text-xs text-slate-600">
-                The app runs seamlessly in offline/LocalStorage mode. To persist and synchronize invoices with your Supabase cloud PostgreSQL database across all team members, provide your project credentials below.
+                {config.isProduction
+                  ? 'Supabase is configured through environment variables. Invoice writes are handled by the secured backend API.'
+                  : 'The app runs seamlessly in offline/LocalStorage mode. To persist and synchronize invoices with your Supabase cloud PostgreSQL database across all team members, provide your project credentials below.'}
               </p>
             </div>
 
             <div className="space-y-3">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Supabase Project URL
-                </label>
-                <input
-                  type="text"
-                  value={supabaseUrl}
-                  onChange={(e) => setSupabaseUrl(e.target.value)}
-                  placeholder="https://your-project-id.supabase.co"
-                  className="w-full text-xs rounded-lg border border-slate-300 p-2 font-mono"
-                />
-              </div>
+              {!config.isProduction && (
+                <>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Supabase Project URL
+                    </label>
+                    <input
+                      type="text"
+                      value={supabaseUrl}
+                      onChange={(e) => setSupabaseUrl(e.target.value)}
+                      placeholder="https://your-project-id.supabase.co"
+                      className="w-full text-xs rounded-lg border border-slate-300 p-2 font-mono"
+                    />
+                  </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Supabase Anon Public API Key
-                </label>
-                <input
-                  type="password"
-                  value={supabaseKey}
-                  onChange={(e) => setSupabaseKey(e.target.value)}
-                  placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                  className="w-full text-xs rounded-lg border border-slate-300 p-2 font-mono"
-                />
-              </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Supabase Anon Public API Key
+                    </label>
+                    <input
+                      type="password"
+                      value={supabaseKey}
+                      onChange={(e) => setSupabaseKey(e.target.value)}
+                      placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                      className="w-full text-xs rounded-lg border border-slate-300 p-2 font-mono"
+                    />
+                  </div>
+                </>
+              )}
 
-              <div className="flex items-center gap-3 pt-1">
+              {config.isProduction && (
+                <p className="text-xs text-slate-600 bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                  Supabase credentials are configured through environment variables in production.
+                </p>
+              )}
+
+              <div className="flex flex-wrap items-center gap-3 pt-1">
+                {!config.isProduction && (
+                  <button
+                    onClick={handleSaveSupabaseConfig}
+                    className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-2 px-4 rounded-lg shadow-sm"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Connect & Refresh Supabase</span>
+                  </button>
+                )}
+
                 <button
-                  onClick={handleSaveSupabaseConfig}
-                  className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-2 px-4 rounded-lg shadow-sm"
+                  onClick={async () => {
+                    await signOut();
+                    window.location.reload();
+                  }}
+                  className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold py-2 px-4 rounded-lg border border-slate-300"
                 >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>Connect & Refresh Supabase</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Sign out of Supabase</span>
                 </button>
               </div>
             </div>

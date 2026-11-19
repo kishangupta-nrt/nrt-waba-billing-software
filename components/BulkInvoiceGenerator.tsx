@@ -589,6 +589,12 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
                           <span className="font-mono text-slate-600">GST: {row.gstin}</span>
                         )}
                       </div>
+                      <div className="mt-1">
+                        <span className="text-[9.5px] font-mono font-bold text-orange-700 bg-orange-100/70 border border-orange-200/90 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                          PI: {previewPiNumbers[idx]}
+                        </span>
+                      </div>
                     </td>
 
                     {/* State & Tax Mode Toggle */}

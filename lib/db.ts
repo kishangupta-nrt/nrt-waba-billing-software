@@ -1,11 +1,18 @@
 import { Client, CompanySettings, Invoice, MonthlyCreditUsage } from './types';
 import { defaultCompanySettings, initialClients, initialInvoices, initialMonthlyUsage } from './mockData';
 import { getSupabase } from './supabase';
+import { config } from './config';
+import { api } from './api';
 import { 
   generateNextUniquePiNumber, 
   generateBatchUniquePiNumbers, 
   extractSequenceNumber 
 } from './piNumberUtils';
+
+// When NEXT_PUBLIC_API_URL is set, every read/write goes through the Render
+// backend (which owns Supabase + validation). Otherwise the legacy direct
+// Supabase/localStorage paths stay available for offline/local development.
+const isApiEnabled = (): boolean => Boolean(config.apiUrl);
 
 const CLIENTS_KEY = 'waba_clients';
 const INVOICES_KEY = 'waba_invoices';
@@ -39,6 +46,8 @@ function setLocal<T>(key: string, value: T): void {
 export const db = {
   // Settings
   async getSettings(): Promise<CompanySettings> {
+    if (isApiEnabled()) return api.getSettings();
+
     const sb = getSupabase();
     if (sb) {
       try {
@@ -52,6 +61,11 @@ export const db = {
   },
 
   async saveSettings(settings: CompanySettings): Promise<void> {
+    if (isApiEnabled()) {
+      await api.saveSettings(settings);
+      return;
+    }
+
     setLocal(SETTINGS_KEY, settings);
     const sb = getSupabase();
     if (sb) {
@@ -102,6 +116,8 @@ export const db = {
 
   // Clients
   async getClients(): Promise<Client[]> {
+    if (isApiEnabled()) return api.getClients();
+
     const sb = getSupabase();
     if (sb) {
       try {
@@ -115,6 +131,11 @@ export const db = {
   },
 
   async saveClient(client: Client): Promise<void> {
+    if (isApiEnabled()) {
+      await api.saveClient(client);
+      return;
+    }
+
     const clients = await this.getClients();
     const existingIndex = clients.findIndex(c => c.id === client.id);
     let updated: Client[];
@@ -137,6 +158,11 @@ export const db = {
   },
 
   async saveClientsBatch(newClients: Client[]): Promise<void> {
+    if (isApiEnabled()) {
+      await api.saveClientsBatch(newClients);
+      return;
+    }
+
     const current = await this.getClients();
     const map = new Map<string, Client>();
     current.forEach(c => map.set(c.id, c));
@@ -155,6 +181,11 @@ export const db = {
   },
 
   async deleteClient(id: string): Promise<void> {
+    if (isApiEnabled()) {
+      await api.deleteClient(id);
+      return;
+    }
+
     const clients = await this.getClients();
     const updated = clients.filter(c => c.id !== id);
     setLocal(CLIENTS_KEY, updated);
@@ -171,6 +202,8 @@ export const db = {
 
   // Invoices
   async getInvoices(): Promise<Invoice[]> {
+    if (isApiEnabled()) return api.getInvoices();
+
     const sb = getSupabase();
     if (sb) {
       try {
@@ -184,6 +217,11 @@ export const db = {
   },
 
   async saveInvoice(invoice: Invoice): Promise<void> {
+    if (isApiEnabled()) {
+      await api.saveInvoice(invoice);
+      return;
+    }
+
     const invoices = await this.getInvoices();
     const idx = invoices.findIndex(i => i.id === invoice.id || i.voucher_no === invoice.voucher_no);
     let updated: Invoice[];
@@ -206,6 +244,11 @@ export const db = {
   },
 
   async saveInvoicesBatch(newInvoices: Invoice[]): Promise<void> {
+    if (isApiEnabled()) {
+      await api.saveInvoicesBatch(newInvoices);
+      return;
+    }
+
     const current = await this.getInvoices();
     const map = new Map<string, Invoice>();
     current.forEach(i => map.set(i.id, i));
@@ -225,6 +268,8 @@ export const db = {
 
   // Monthly Usage
   async getMonthlyUsage(month?: string, year?: number): Promise<MonthlyCreditUsage[]> {
+    if (isApiEnabled()) return api.getMonthlyUsage(month, year);
+
     const sb = getSupabase();
     if (sb) {
       try {
@@ -243,6 +288,11 @@ export const db = {
   },
 
   async saveMonthlyUsageRecord(record: MonthlyCreditUsage): Promise<void> {
+    if (isApiEnabled()) {
+      await api.saveMonthlyUsageRecord(record);
+      return;
+    }
+
     const all = await this.getMonthlyUsage();
     const idx = all.findIndex(u => u.id === record.id);
     let updated: MonthlyCreditUsage[];
@@ -265,6 +315,11 @@ export const db = {
   },
 
   async saveMonthlyUsageBatch(records: MonthlyCreditUsage[]): Promise<void> {
+    if (isApiEnabled()) {
+      await api.saveMonthlyUsageBatch(records);
+      return;
+    }
+
     const all = await this.getMonthlyUsage();
     const map = new Map<string, MonthlyCreditUsage>();
     all.forEach(u => map.set(u.id, u));

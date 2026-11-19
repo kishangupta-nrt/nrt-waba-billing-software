@@ -7,6 +7,7 @@ import { BulkInvoiceGenerator } from '@/components/BulkInvoiceGenerator';
 import { MonthlyHistory } from '@/components/MonthlyHistory';
 import { ClientManager } from '@/components/ClientManager';
 import { SettingsModal } from '@/components/SettingsModal';
+import { AuthGate } from '@/components/AuthGate';
 import { db } from '@/lib/db';
 import { getSupabase } from '@/lib/supabase';
 import { defaultCompanySettings } from '@/lib/mockData';
@@ -14,7 +15,7 @@ import { Client, CompanySettings, Invoice, MonthlyCreditUsage } from '@/lib/type
 import { generateNextUniquePiNumber } from '@/lib/piNumberUtils';
 import { Sparkles, Layers, FileText, ArrowRight, ShieldCheck } from 'lucide-react';
 
-export default function Home() {
+function BillingDashboard() {
   const [activeTab, setActiveTab] = useState<'single' | 'bulk' | 'history' | 'clients' | 'settings'>('single');
   const [clients, setClients] = useState<Client[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings>(defaultCompanySettings);
@@ -75,7 +76,7 @@ export default function Home() {
     const clientUsageId = `usage_${invoice.client_id || 'manual'}_${Date.now()}`;
     const newUsageRecord: MonthlyCreditUsage = {
       id: clientUsageId,
-      client_id: invoice.client_id || 'manual',
+      client_id: invoice.client_id || null,
       client_name: invoice.buyer_name,
       month: invoice.billing_month ? invoice.billing_month.split(' ')[0] : 'November',
       year: 2026,
@@ -110,7 +111,7 @@ export default function Home() {
     // Update usage records for each invoice
     const newUsageRecords: MonthlyCreditUsage[] = batchInvoices.map((inv, idx) => ({
       id: `usage_batch_${Date.now()}_${idx}`,
-      client_id: inv.client_id || `client_${idx}`,
+      client_id: inv.client_id || null,
       client_name: inv.buyer_name,
       month: inv.billing_month ? inv.billing_month.split(' ')[0] : 'November',
       year: 2026,
@@ -321,5 +322,13 @@ export default function Home() {
         </div>
       </footer>
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <AuthGate>
+      <BillingDashboard />
+    </AuthGate>
   );
 }

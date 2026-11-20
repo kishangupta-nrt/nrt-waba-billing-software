@@ -1,16 +1,38 @@
 import { Hono } from 'hono';
 import { supabaseAdmin } from '../supabase';
-import { ClientSchema } from '../schemas';
+import { ClientSchema, type ClientInput } from '../schemas';
 import { fail } from '../errors';
 import type { AppEnv } from '../auth';
+import { determineTaxMode } from '../../../lib/taxUtils';
 
 export const clients = new Hono<AppEnv>();
 
+const MAX_BATCH = 100;
+const MAX_LIMIT = 500;
+
+async function getSellerStateCode(): Promise<string> {
+  const { data } = await supabaseAdmin
+    .from('company_settings')
+    .select('state_code')
+    .limit(1)
+    .maybeSingle();
+  return data?.state_code || '23';
+}
+
 clients.get('/', async (c) => {
-  const { data, error } = await supabaseAdmin.from('clients').select('*').order('name');
+  const limitRaw = Number(c.req.query('limit') ?? 200);
+  const offsetRaw = Number(c.req.query('offset') ?? 0);
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), MAX_LIMIT) : 200;
+  const offset = Number.isFinite(offsetRaw) ? Math.max(Math.trunc(offsetRaw), 0) : 0;
+
+  const { data, error } = await supabaseAdmin
+    .from('clients')
+    .select('*')
+    .order('name')
+    .range(offset, offset + limit - 1);
 
   if (error) return fail(c, error);
-  return c.json({ success: true, data: data ?? [] });
+  return c.json({ success: true, data: data ?? [], limit, offset });
 });
 
 clients.post('/', async (c) => {
@@ -23,6 +45,16 @@ clients.post('/', async (c) => {
 
   const isBatch = Array.isArray(body);
   const inputRows: unknown[] = isBatch ? (body as unknown[]) : [body];
+
+  if (inputRows.length === 0 || inputRows.length > MAX_BATCH) {
+    return c.json(
+      { success: false, error: `Batch must contain between 1 and ${MAX_BATCH} clients` },
+      400
+    );
+  }
+
+  const sellerStateCode = await getSellerStateCode();
+  const now = new Date().toISOString();
   const rows = [];
 
   for (let index = 0; index < inputRows.length; index += 1) {
@@ -33,18 +65,58 @@ clients.post('/', async (c) => {
         400
       );
     }
+
+    const input = parsed.data as ClientInput;
+
+    let existing: { id: string; created_at?: string; name?: string } | null = null;
+    if (input.id) {
+      const { data, error } = await supabaseAdmin
+        .from('clients')
+        .select('id, created_at, name')
+        .eq('id', input.id)
+        .maybeSingle();
+      if (error) return fail(c, error);
+      existing = data;
+    }
+
+    const targetId = existing?.id || crypto.randomUUID();
+
+    const { data: duplicate, error: duplicateError } = await supabaseAdmin
+      .from('clients')
+      .select('id, name')
+      .ilike('name', input.name)
+      .neq('id', targetId)
+      .limit(1);
+
+    if (duplicateError) return fail(c, duplicateError);
+    if (duplicate && duplicate.length > 0) {
+      return c.json(
+        { success: false, error: `A client named "${input.name}" already exists` },
+        409
+      );
+    }
+
     rows.push({
-      ...parsed.data,
-      id: parsed.data.id || crypto.randomUUID(),
-      created_at: parsed.data.created_at || undefined,
+      id: targetId,
+      name: input.name,
+      business_name: input.business_name || null,
+      address: input.address || '',
+      state_name: input.state_name,
+      state_code: input.state_code,
+      gstin: (input.gstin || '').toUpperCase() || null,
+      email: input.email || null,
+      phone: input.phone || null,
+      reference_category: input.reference_category || 'General',
+      default_rate: input.default_rate,
+      default_tax_mode: determineTaxMode(input.state_code, sellerStateCode),
+      created_at: existing?.created_at || now,
     });
   }
 
-  if (rows.length === 0) {
-    return c.json({ success: false, error: 'No clients supplied' }, 400);
-  }
-
-  const { data, error } = await supabaseAdmin.from('clients').upsert(rows).select();
+  const { data, error } = await supabaseAdmin
+    .from('clients')
+    .upsert(rows, { onConflict: 'id' })
+    .select();
 
   if (error) return fail(c, error);
   return c.json({ success: true, data: isBatch ? data : data?.[0], count: rows.length });

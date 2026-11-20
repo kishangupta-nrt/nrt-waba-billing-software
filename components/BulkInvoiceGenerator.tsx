@@ -1,34 +1,80 @@
 'use client';
 
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Papa from 'papaparse';
 import JSZip from 'jszip';
-import { Client, CompanySettings, Invoice, TaxMode, BatchClientRow } from '@/lib/types';
+import { Client, CompanySettings, Invoice, BatchClientRow } from '@/lib/types';
 import { InvoiceTemplate } from './InvoiceTemplate';
-import { calculateInvoiceTotals, formatDateForDisplay, determineTaxMode, INDIAN_STATES } from '@/lib/taxUtils';
+import {
+  buildBillingPeriodDescription,
+  calculateInvoiceTotals,
+  currentMonthValue,
+  determineTaxMode,
+  formatDateForDisplay,
+  INDIAN_STATES,
+  isValidStateCode,
+  monthValueToLabel,
+  monthValueToParts,
+  todayDateValue,
+  validateGstin,
+} from '@/lib/taxUtils';
 import { numberToIndianWords } from '@/lib/numberToWords';
-import { generatePdfBlob, exportElementToPdf } from '@/lib/pdfGenerator';
 import { generateBatchUniquePiNumbers } from '@/lib/piNumberUtils';
-import { 
-  FileSpreadsheet, 
-  Upload, 
-  Download, 
-  CheckSquare, 
-  Square, 
-  Play, 
-  CheckCircle2, 
-  Eye, 
-  X, 
-  Printer, 
+import { downloadBlob } from '@/lib/csvUtils';
+import {
+  FileSpreadsheet,
+  Upload,
+  Download,
+  CheckSquare,
+  Square,
+  Play,
+  CheckCircle2,
+  Eye,
+  X,
+  Printer,
   FolderArchive,
-  AlertCircle
+  AlertCircle,
 } from 'lucide-react';
 
 interface BulkInvoiceGeneratorProps {
   clients: Client[];
   companySettings: CompanySettings;
-  onSaveInvoicesBatch: (invoices: Invoice[]) => Promise<void>;
+  onSaveInvoicesBatch: (invoices: Invoice[]) => Promise<Invoice[]>;
   existingInvoices?: Invoice[];
+}
+
+const MAX_BATCH = 100;
+
+function taxModeFor(stateCode: string, companyStateCode: string) {
+  return determineTaxMode(stateCode || '23', companyStateCode || '23');
+}
+
+function newRowFromClient(
+  client: Client,
+  companySettings: CompanySettings,
+  billingMonth: string,
+  formattedDue: string,
+  description: string
+): BatchClientRow {
+  const stateCode = isValidStateCode(client.state_code) ? client.state_code : '23';
+  const stateName =
+    INDIAN_STATES.find(s => s.code === stateCode)?.name || client.state_name || 'Madhya Pradesh';
+
+  return {
+    selected: true,
+    clientId: client.id,
+    clientName: client.name,
+    stateName,
+    stateCode,
+    gstin: client.gstin || '',
+    category: client.reference_category || 'General',
+    messageType: description,
+    credits: 0,
+    rate: Number(client.default_rate ?? companySettings.default_rate ?? 0.365),
+    taxMode: taxModeFor(stateCode, companySettings.state_code),
+    billingMonth,
+    dueOn: formattedDue,
+  };
 }
 
 export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
@@ -38,57 +84,80 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
   existingInvoices = [],
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const today = todayDateValue();
+  const initialMonthValue = currentMonthValue();
+  const initialMonthLabel = monthValueToLabel(initialMonthValue);
+  const initialDescription = buildBillingPeriodDescription(initialMonthValue);
 
-  // Billing month & date defaults
-  const [billingPeriodDesc, setBillingPeriodDesc] = useState<string>('Utility Message TILL 31 OCT 2026');
-  const [invoiceDate, setInvoiceDate] = useState<string>('2026-11-02');
-  const [dueDate, setDueDate] = useState<string>('2026-11-02');
+  const [billingMonth, setBillingMonth] = useState(initialMonthValue);
+  const [billingPeriodDesc, setBillingPeriodDesc] = useState(initialDescription);
+  const [invoiceDate, setInvoiceDate] = useState(today);
+  const [dueDate, setDueDate] = useState(today);
 
-  // Initial table populated from clients
-  const [rows, setRows] = useState<BatchClientRow[]>(() => {
-    return clients.map((c, index) => {
-      const stateCode = c.state_code || '23';
-      const autoTax = c.default_tax_mode || determineTaxMode(stateCode, companySettings.state_code);
-      const defaultQty = c.name.includes('DERMATOLOGY') ? 756 : 1000 + index * 500;
-      return {
-        selected: true,
-        clientId: c.id,
-        clientName: c.name,
-        stateName: c.state_name || 'Madhya Pradesh',
-        stateCode: stateCode,
-        gstin: c.gstin || '',
-        category: c.reference_category || 'General',
-        messageType: 'Utility Message TILL 31 OCT 2026',
-        credits: defaultQty,
-        rate: c.default_rate || companySettings.default_rate || 0.3650,
-        taxMode: autoTax,
-        billingMonth: 'October 2026',
-        dueOn: '2-Nov-26',
-      };
-    });
-  });
+  const [rows, setRows] = useState<BatchClientRow[]>(() =>
+    clients.map(client =>
+      newRowFromClient(
+        client,
+        companySettings,
+        initialMonthLabel,
+        formatDateForDisplay(today),
+        initialDescription
+      )
+    )
+  );
 
-  const [globalRate, setGlobalRate] = useState<string>('0.3650');
-  const [isGenerating, setIsGenerating] = useState<boolean>(false);
+  const [globalRate, setGlobalRate] = useState(String(companySettings.default_rate ?? 0.365));
+  const [isGenerating, setIsGenerating] = useState(false);
   const [generatedInvoices, setGeneratedInvoices] = useState<Invoice[]>([]);
   const [previewInvoice, setPreviewInvoice] = useState<Invoice | null>(null);
-  const [isZipping, setIsZipping] = useState<boolean>(false);
-  const [zipProgress, setZipProgress] = useState<string>('');
+  const [isZipping, setIsZipping] = useState(false);
+  const [zipProgress, setZipProgress] = useState('');
+  const [error, setError] = useState<string | null>(null);
 
-  // Pre-calculate live preview of unique PI Numbers for each row
-  const previewPiNumbers = React.useMemo(() => {
-    return generateBatchUniquePiNumbers(
+  useEffect(() => {
+    if (rows.length > 0 || clients.length === 0) return;
+    setRows(
+      clients.map(client =>
+        newRowFromClient(
+          client,
+          companySettings,
+          monthValueToLabel(billingMonth),
+          formatDateForDisplay(invoiceDate),
+          billingPeriodDesc
+        )
+      )
+    );
+  }, [clients, rows.length, companySettings, billingMonth, invoiceDate, billingPeriodDesc]);
+
+  const selectedCount = rows.filter(r => r.selected).length;
+
+  const previewPiNumbers = useMemo(() => {
+    const numbers = generateBatchUniquePiNumbers(
       existingInvoices,
-      rows.length,
+      Math.max(selectedCount, 1),
       companySettings.voucher_prefix || 'NRT/PI/',
       invoiceDate,
       companySettings.current_voucher_seq || 242
     );
-  }, [existingInvoices, rows.length, companySettings.voucher_prefix, companySettings.current_voucher_seq, invoiceDate]);
-
-  // Selection counts
-  const selectedCount = rows.filter(r => r.selected).length;
+    const map = new Map<number, string>();
+    let cursor = 0;
+    rows.forEach((row, index) => {
+      if (row.selected && cursor < numbers.length) {
+        map.set(index, numbers[cursor]);
+        cursor += 1;
+      }
+    });
+    return map;
+  }, [
+    existingInvoices,
+    rows,
+    selectedCount,
+    companySettings.voucher_prefix,
+    companySettings.current_voucher_seq,
+    invoiceDate,
+  ]);
   const isAllSelected = rows.length > 0 && selectedCount === rows.length;
+  const formattedInvoiceDate = formatDateForDisplay(invoiceDate);
 
   const toggleSelectAll = () => {
     const nextVal = !isAllSelected;
@@ -103,154 +172,217 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
     });
   };
 
-  const updateRow = (index: number, field: keyof BatchClientRow, val: any) => {
+  const updateRow = <K extends keyof BatchClientRow>(
+    index: number,
+    field: K,
+    value: BatchClientRow[K]
+  ) => {
     setRows(prev => {
       const copy = [...prev];
-      copy[index] = { ...copy[index], [field]: val };
+      copy[index] = { ...copy[index], [field]: value, errorMsg: undefined, voucherNo: undefined };
       return copy;
     });
   };
 
-  // Apply Global Rate
   const applyGlobalRate = () => {
-    const num = parseFloat(globalRate);
-    if (isNaN(num) || num <= 0) return;
-    setRows(prev => prev.map(r => r.selected ? { ...r, rate: num } : r));
+    const num = Number(globalRate);
+    if (!Number.isFinite(num) || num < 0) {
+      setError('Enter a valid non-negative global rate.');
+      return;
+    }
+    setError(null);
+    setRows(prev =>
+      prev.map(r =>
+        r.selected ? { ...r, rate: num, errorMsg: undefined, voucherNo: undefined } : r
+      )
+    );
   };
 
-  // Apply Global Billing Description
   const applyGlobalDescription = () => {
-    if (!billingPeriodDesc.trim()) return;
-    setRows(prev => prev.map(r => r.selected ? { ...r, messageType: billingPeriodDesc } : r));
+    if (!billingPeriodDesc.trim()) {
+      setError('Billing description cannot be empty.');
+      return;
+    }
+    setError(null);
+    setRows(prev =>
+      prev.map(r =>
+        r.selected
+          ? { ...r, messageType: billingPeriodDesc.trim(), errorMsg: undefined, voucherNo: undefined }
+          : r
+      )
+    );
   };
 
-  // Download Sample CSV
+  const handleBillingMonthChange = (value: string) => {
+    setBillingMonth(value);
+    if (!monthValueToParts(value)) return;
+    const description = buildBillingPeriodDescription(value);
+    const label = monthValueToLabel(value);
+    setBillingPeriodDesc(description);
+    setRows(prev =>
+      prev.map(r => ({
+        ...r,
+        billingMonth: label,
+        messageType: description,
+        voucherNo: undefined,
+        status: 'pending',
+      }))
+    );
+  };
+
+  const handleInvoiceDateChange = (value: string) => {
+    setInvoiceDate(value);
+    setDueDate(value);
+    const formatted = formatDateForDisplay(value);
+    setRows(prev =>
+      prev.map(r => ({ ...r, dueOn: formatted, voucherNo: undefined, status: 'pending' }))
+    );
+  };
+
   const handleDownloadSampleCsv = () => {
-    const sampleData = [
-      {
-        'Client Name': 'DERMATOLOGY AND BEYOD',
-        'State Name': 'Madhya Pradesh',
-        'State Code': '23',
-        'GSTIN': '',
-        'Reference Category': 'Health Clinic',
-        'Message Description': 'Utility Message TILL 31 OCT 2026',
-        'Credits Quantity': 756,
-        'Rate': 0.3650,
-        'Tax Mode': 'CGST_SGST',
-      },
-      {
-        'Client Name': 'MEDILINK HOSPITALS & RESEARCH',
-        'State Name': 'Maharashtra',
-        'State Code': '27',
-        'GSTIN': '27AABCM8291C1ZP',
-        'Reference Category': 'Healthcare',
-        'Message Description': 'Utility Message TILL 31 OCT 2026',
-        'Credits Quantity': 12450,
-        'Rate': 0.3800,
-        'Tax Mode': 'IGST',
-      },
-      {
-        'Client Name': 'URBAN STYLE BOUTIQUE',
-        'State Name': 'Delhi',
-        'State Code': '07',
-        'GSTIN': '07AAECU9012D1ZR',
-        'Reference Category': 'E-commerce',
-        'Message Description': 'Utility Message TILL 31 OCT 2026',
-        'Credits Quantity': 3420,
-        'Rate': 0.3650,
-        'Tax Mode': 'IGST',
-      },
-      {
-        'Client Name': 'APEX DENTAL CLINIC',
-        'State Name': 'Madhya Pradesh',
-        'State Code': '23',
-        'GSTIN': '',
-        'Reference Category': 'Dental Clinic',
-        'Message Description': 'Utility Message TILL 31 OCT 2026',
-        'Credits Quantity': 890,
-        'Rate': 0.3650,
-        'Tax Mode': 'CGST_SGST',
-      }
+    const headers = [
+      'Client Name',
+      'State Name',
+      'State Code',
+      'GSTIN',
+      'Reference Category',
+      'Message Description',
+      'Credits Quantity',
+      'Rate',
     ];
-
-    const csv = Papa.unparse(sampleData);
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', 'waba_billing_sample_template.csv');
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    downloadBlob(`${headers.join(',')}\r\n`, 'waba_billing_sample_template.csv', 'text/csv;charset=utf-8;');
   };
 
-  // Upload and Parse CSV
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
     if (!file) return;
 
-    Papa.parse(file, {
+    setError(null);
+
+    if (file.size > 2 * 1024 * 1024) {
+      setError('CSV file is too large. Keep it under 2 MB.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    Papa.parse<Record<string, string>>(file, {
       header: true,
-      skipEmptyLines: true,
-      complete: (results) => {
-        const parsedRows: BatchClientRow[] = (results.data as any[]).map((row, idx) => {
-          const clientName = row['Client Name'] || row['Client'] || row['client_name'] || `Client ${idx + 1}`;
-          const stateName = row['State Name'] || row['State'] || 'Madhya Pradesh';
-          const stateCode = row['State Code'] || (INDIAN_STATES.find(s => s.name.toLowerCase() === stateName.toLowerCase())?.code || '23');
-          const credits = parseFloat(row['Credits Quantity'] || row['Credits'] || row['Quantity'] || '1000') || 0;
-          const rate = parseFloat(row['Rate'] || row['rate'] || '0.3650') || 0.3650;
-          let taxMode: TaxMode = 'CGST_SGST';
-          const explicitTax = row['Tax Mode'] || row['Tax'];
-          if (explicitTax && (explicitTax.toUpperCase().includes('IGST') || explicitTax === 'IGST')) {
-            taxMode = 'IGST';
-          } else if (stateCode !== companySettings.state_code) {
-            taxMode = 'IGST';
-          }
+      skipEmptyLines: 'greedy',
+      complete: results => {
+        const dataRows = results.data.filter(row => Object.values(row).some(Boolean));
+        if (dataRows.length === 0) {
+          setError('The CSV file has no data rows.');
+          return;
+        }
+        if (dataRows.length > MAX_BATCH) {
+          setError(`CSV contains ${dataRows.length} rows. The maximum for one batch is ${MAX_BATCH}.`);
+          return;
+        }
+
+        const parsedRows = dataRows.map((row, index): BatchClientRow => {
+          const rawName = row['Client Name'] || row['Client'] || row['client_name'] || '';
+          const rawStateName = (row['State Name'] || row['State'] || '').trim();
+          const rawStateCode = (row['State Code'] || row['state_code'] || '').trim().padStart(2, '0');
+          const matchedState = INDIAN_STATES.find(
+            state =>
+              state.name.toLowerCase() === rawStateName.toLowerCase() ||
+              state.code === rawStateCode
+          );
+          const stateCode = matchedState?.code || rawStateCode;
+          const stateName = matchedState?.name || rawStateName || 'Madhya Pradesh';
+          const creditsRaw = row['Credits Quantity'] || row['Credits'] || row['Quantity'] || '0';
+          const rateRaw = row['Rate'] || row['rate'] || String(companySettings.default_rate ?? 0.365);
+          const credits = Number(creditsRaw);
+          const rate = Number(rateRaw);
+          const gstin = (row['GSTIN'] || '').trim().toUpperCase();
+          const gstinCheck = validateGstin(gstin, stateCode);
+
+          let rowError: string | undefined;
+          if (!rawName.trim()) rowError = 'Client name is missing.';
+          else if (!isValidStateCode(stateCode)) rowError = `Invalid state code "${stateCode}".`;
+          else if (!Number.isFinite(credits) || credits < 0) rowError = 'Credits must be a non-negative number.';
+          else if (!Number.isFinite(rate) || rate < 0) rowError = 'Rate must be a non-negative number.';
+          else if (!gstinCheck.valid) rowError = gstinCheck.error;
 
           return {
             selected: true,
-            clientName: clientName.trim(),
-            stateName: stateName.trim(),
-            stateCode: String(stateCode).trim(),
-            gstin: (row['GSTIN'] || '').trim(),
+            clientName: rawName.trim() || `Row ${index + 1}`,
+            stateName,
+            stateCode,
+            gstin,
             category: (row['Reference Category'] || row['Category'] || 'General').trim(),
             messageType: row['Message Description'] || billingPeriodDesc,
-            credits,
-            rate,
-            taxMode,
-            billingMonth: 'October 2026',
-            dueOn: formatDateForDisplay(invoiceDate),
+            credits: Number.isFinite(credits) ? credits : 0,
+            rate: Number.isFinite(rate) ? rate : Number(companySettings.default_rate ?? 0.365),
+            taxMode: taxModeFor(stateCode, companySettings.state_code),
+            billingMonth: monthValueToLabel(billingMonth),
+            dueOn: formattedInvoiceDate,
+            status: rowError ? 'error' : 'pending',
+            errorMsg: rowError,
           };
         });
 
-        if (parsedRows.length > 0) {
-          setRows(parsedRows);
+        setRows(parsedRows);
+        const invalidCount = parsedRows.filter(row => row.errorMsg).length;
+        if (invalidCount > 0) {
+          setError(`${invalidCount} row(s) have validation errors. Fix them before generating.`);
         }
       },
-      error: (err) => {
-        alert(`Failed to parse CSV file: ${err.message}`);
-      }
+      error: err => {
+        setError(`Failed to parse CSV file: ${err.message}`);
+      },
     });
 
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // Generate All Selected Invoices
+  const rowValidationError = (row: BatchClientRow): string | null => {
+    if (!row.clientName.trim()) return 'Client name is required.';
+    if (!isValidStateCode(row.stateCode)) return `Invalid state code "${row.stateCode}".`;
+    if (!Number.isFinite(row.credits) || row.credits <= 0) return 'Credits must be greater than zero.';
+    if (!Number.isFinite(row.rate) || row.rate < 0) return 'Rate must be non-negative.';
+    const gstinCheck = validateGstin(row.gstin, row.stateCode);
+    if (!gstinCheck.valid) return gstinCheck.error || 'GSTIN is invalid.';
+    const expected = taxModeFor(row.stateCode, companySettings.state_code);
+    if (row.taxMode !== expected) return `Tax mode must be ${expected === 'IGST' ? 'IGST' : 'CGST+SGST'}.`;
+    return null;
+  };
+
   const handleGenerateInvoices = async () => {
-    const selectedRows = rows.filter(r => r.selected && r.credits > 0);
+    setError(null);
+    const selectedRows = rows
+      .map((row, index) => ({ row, index }))
+      .filter(({ row }) => row.selected);
+
     if (selectedRows.length === 0) {
-      alert('Please select at least one client with credits > 0');
+      setError('Select at least one client to generate invoices.');
+      return;
+    }
+    if (selectedRows.length > MAX_BATCH) {
+      setError(`Select no more than ${MAX_BATCH} clients in one batch.`);
+      return;
+    }
+
+    const invalid: string[] = [];
+    for (const { row, index } of selectedRows) {
+      const rowError = rowValidationError(row);
+      if (rowError) invalid.push(`Row ${index + 1}: ${rowError}`);
+    }
+    if (invalid.length > 0) {
+      setRows(prev =>
+        prev.map(row => {
+          if (!row.selected) return row;
+          const rowError = rowValidationError(row);
+          return rowError ? { ...row, status: 'error', errorMsg: rowError } : row;
+        })
+      );
+      setError(invalid.join(' '));
       return;
     }
 
     setIsGenerating(true);
     try {
       const generated: Invoice[] = [];
-      const formattedDate = formatDateForDisplay(invoiceDate);
-
-      // Generate strictly unique sequential PI numbers for the batch
       const uniqueVouchers = generateBatchUniquePiNumbers(
         existingInvoices,
         selectedRows.length,
@@ -259,41 +391,36 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
         companySettings.current_voucher_seq || 242
       );
 
-      for (let i = 0; i < selectedRows.length; i++) {
-        const row = selectedRows[i];
-        const voucherNo = uniqueVouchers[i];
-
-        const itemAmount = Number((row.credits * row.rate).toFixed(4));
+      selectedRows.forEach(({ row }, batchIndex) => {
+        const voucherNo = uniqueVouchers[batchIndex];
         const item = {
-          id: `item_bulk_${i}_${Date.now()}`,
+          id: `item_bulk_${batchIndex}_${Date.now()}`,
           sl_no: 1,
           service_title: 'WhatsApp Business API',
           service_description: row.messageType || billingPeriodDesc,
           hsn_sac: companySettings.default_hsn || '998314',
-          due_on: formattedDate,
+          due_on: formattedInvoiceDate,
           quantity: row.credits,
           rate: row.rate,
           per: 'NOS',
-          amount: itemAmount,
+          amount: Number((row.credits * row.rate).toFixed(4)),
         };
-
         const totals = calculateInvoiceTotals([item], row.taxMode);
-        const amountWords = numberToIndianWords(totals.totalAmount);
 
-        const inv: Invoice = {
-          id: `inv_bulk_${Date.now()}_${i}`,
+        generated.push({
+          id: `inv_bulk_${Date.now()}_${batchIndex}`,
           voucher_no: voucherNo,
           invoice_type: 'Proforma Invoice',
           invoice_date: invoiceDate,
-          formatted_date: formattedDate,
+          formatted_date: formattedInvoiceDate,
           due_date: dueDate,
           buyer_order_no: voucherNo,
           other_references: row.category,
           client_id: row.clientId,
-          buyer_name: row.clientName,
+          buyer_name: row.clientName.trim(),
           buyer_state_name: row.stateName,
           buyer_state_code: row.stateCode,
-          buyer_gstin: row.gstin,
+          buyer_gstin: row.gstin.trim().toUpperCase(),
           tax_mode: row.taxMode,
           items: [item],
           subtotal: totals.subtotal,
@@ -306,58 +433,82 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
           round_off: totals.roundOff,
           total_amount: totals.totalAmount,
           total_quantity: totals.totalQuantity,
-          amount_in_words: amountWords,
-          billing_month: 'October 2026',
+          amount_in_words: numberToIndianWords(totals.totalAmount),
+          billing_month: monthValueToLabel(billingMonth),
           status: 'Sent',
           created_at: new Date().toISOString(),
-        };
+        });
+      });
 
-        generated.push(inv);
-      }
+      const saved = await onSaveInvoicesBatch(generated);
+      const finalInvoices = saved.length > 0 ? saved : generated;
+      setGeneratedInvoices(finalInvoices);
 
-      await onSaveInvoicesBatch(generated);
-      setGeneratedInvoices(generated);
+      const savedByRow = new Map<number, Invoice>();
+      selectedRows.forEach(({ index }, batchIndex) => {
+        const invoice = finalInvoices[batchIndex];
+        if (invoice) savedByRow.set(index, invoice);
+      });
+      setRows(prev =>
+        prev.map((row, index) => {
+          const invoice = savedByRow.get(index);
+          return invoice
+            ? { ...row, voucherNo: invoice.voucher_no, status: 'success', errorMsg: undefined }
+            : row;
+        })
+      );
     } catch (err) {
-      console.error('Batch generation error:', err);
-      alert('Error generating batch invoices');
+      setError(err instanceof Error ? err.message : 'Error generating batch invoices.');
     } finally {
       setIsGenerating(false);
     }
   };
 
-  // Download All generated invoices as a single ZIP of PDFs
   const handleDownloadAllZip = async () => {
     if (generatedInvoices.length === 0) return;
     setIsZipping(true);
-    setZipProgress('Initializing ZIP package...');
+    setZipProgress('Preparing invoice renders…');
+    setError(null);
 
     try {
+      const { generatePdfBlob } = await import('@/lib/pdfGenerator');
       const zip = new JSZip();
-      const container = document.getElementById('bulk-offscreen-render');
+      let added = 0;
+      const failures: string[] = [];
 
-      for (let i = 0; i < generatedInvoices.length; i++) {
-        const inv = generatedInvoices[i];
-        setZipProgress(`Rendering PDF ${i + 1} of ${generatedInvoices.length}: ${inv.buyer_name}...`);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (document.fonts?.ready) await document.fonts.ready;
 
-        if (container) {
-          // Mount the invoice into the offscreen container
-          setPreviewInvoice(inv);
-          // Wait for DOM paint
-          await new Promise(res => setTimeout(res, 200));
+      for (let index = 0; index < generatedInvoices.length; index += 1) {
+        const invoice = generatedInvoices[index];
+        setZipProgress(
+          `Rendering PDF ${index + 1} of ${generatedInvoices.length}: ${invoice.buyer_name}…`
+        );
 
-          const element = document.getElementById('bulk-single-pdf-render');
-          if (element) {
-            const blob = await generatePdfBlob(element, inv.voucher_no);
-            if (blob) {
-              const cleanBuyer = inv.buyer_name.replace(/[^a-zA-Z0-9]/g, '_');
-              const cleanVoucher = inv.voucher_no.replace(/[^a-zA-Z0-9]/g, '_');
-              zip.file(`Invoice_${cleanVoucher}_${cleanBuyer}.pdf`, blob);
-            }
-          }
+        const element = document.getElementById(`bulk-pdf-${index}`);
+        if (!element) {
+          failures.push(`${invoice.voucher_no}: render container missing`);
+          continue;
+        }
+
+        try {
+          const blob = await generatePdfBlob(element, invoice.voucher_no);
+          const cleanBuyer = invoice.buyer_name.replace(/[^a-zA-Z0-9]/g, '_');
+          const cleanVoucher = invoice.voucher_no.replace(/[^a-zA-Z0-9]/g, '_');
+          zip.file(`Invoice_${cleanVoucher}_${cleanBuyer}.pdf`, blob);
+          added += 1;
+        } catch (err) {
+          failures.push(
+            `${invoice.voucher_no}: ${err instanceof Error ? err.message : 'PDF failed'}`
+          );
         }
       }
 
-      setZipProgress('Compressing ZIP archive...');
+      if (added === 0) {
+        throw new Error(failures[0] || 'No PDFs could be generated.');
+      }
+
+      setZipProgress('Compressing ZIP archive…');
       const content = await zip.generateAsync({ type: 'blob' });
       const url = URL.createObjectURL(content);
       const link = document.createElement('a');
@@ -366,38 +517,69 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      setZipProgress('Download complete!');
-      setTimeout(() => setZipProgress(''), 3000);
+      URL.revokeObjectURL(url);
+
+      setZipProgress(
+        failures.length > 0
+          ? `Download complete with ${failures.length} failure(s): ${failures[0]}`
+          : 'Download complete.'
+      );
+      setTimeout(() => setZipProgress(''), 5000);
     } catch (err) {
-      console.error('Error generating ZIP:', err);
-      alert('Failed to generate ZIP');
+      setError(err instanceof Error ? err.message : 'Failed to generate ZIP.');
+      setZipProgress('');
     } finally {
       setIsZipping(false);
     }
   };
 
+  const handleDownloadPreviewPdf = async () => {
+    if (!previewInvoice) return;
+    setError(null);
+    try {
+      const cleanBuyer = previewInvoice.buyer_name.replace(/[^a-zA-Z0-9]/g, '_');
+      const cleanVoucher = previewInvoice.voucher_no.replace(/[^a-zA-Z0-9]/g, '_');
+      const { exportElementToPdf } = await import('@/lib/pdfGenerator');
+      await exportElementToPdf(
+        'modal-invoice-replica',
+        `Invoice_${cleanVoucher}_${cleanBuyer}.pdf`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to generate PDF.');
+    }
+  };
+
   return (
-    <div className="space-y-6">
-      {/* Top Banner & File Import Card */}
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b pb-4">
+    <div className="space-y-4 sm:space-y-6">
+      {error && (
+        <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+          <div className="flex-1">{error}</div>
+          <button onClick={() => setError(null)} className="text-red-500 hover:text-red-700" aria-label="Dismiss">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-5 space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b pb-4">
           <div>
-            <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
+            <h2 className="text-sm sm:text-base font-bold text-slate-800 flex items-center gap-2">
               <FileSpreadsheet className="w-5 h-5 text-orange-600" />
-              Multi-Client Batch Billing in One Go
+              Multi-Client Batch Billing
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Generate formatted proforma invoices for multiple clients simultaneously. Import sample CSV or edit directly below.
+              Import a CSV or edit rows directly. Voucher numbers are finalized by the server at save time.
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={handleDownloadSampleCsv}
               className="flex items-center gap-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-lg border border-slate-300 transition-colors"
             >
               <Download className="w-4 h-4 text-slate-600" />
-              <span>Download Sample CSV</span>
+              <span>Sample CSV</span>
             </button>
 
             <button
@@ -405,31 +587,43 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
               className="flex items-center gap-1.5 text-xs font-semibold text-white bg-orange-600 hover:bg-orange-700 px-3.5 py-2 rounded-lg shadow-sm transition-colors"
             >
               <Upload className="w-4 h-4" />
-              <span>Upload CSV / Sample File</span>
+              <span>Upload CSV</span>
             </button>
             <input
               type="file"
               ref={fileInputRef}
               onChange={handleFileUpload}
-              accept=".csv"
+              accept=".csv,text/csv"
               className="hidden"
             />
           </div>
         </div>
 
-        {/* Global Controls Bar */}
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 bg-slate-50 p-3.5 rounded-lg border border-slate-200 text-xs">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3 bg-slate-50 p-3.5 rounded-lg border border-slate-200 text-xs">
           <div>
-            <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-              Common Service / Billing Description
+            <label htmlFor="bulk-month" className="block text-[11px] font-semibold text-slate-600 mb-1">
+              Billing Month
+            </label>
+            <input
+              id="bulk-month"
+              type="month"
+              value={billingMonth}
+              onChange={(e) => handleBillingMonthChange(e.target.value)}
+              className="w-full text-xs rounded border border-slate-300 p-1.5"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="bulk-description" className="block text-[11px] font-semibold text-slate-600 mb-1">
+              Common Description
             </label>
             <div className="flex gap-1.5">
               <input
+                id="bulk-description"
                 type="text"
                 value={billingPeriodDesc}
                 onChange={(e) => setBillingPeriodDesc(e.target.value)}
-                placeholder="Utility Message TILL 31 OCT 2026"
-                className="flex-1 text-xs rounded border border-slate-300 p-1.5"
+                className="flex-1 min-w-0 text-xs rounded border border-slate-300 p-1.5"
               />
               <button
                 onClick={applyGlobalDescription}
@@ -441,46 +635,47 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
           </div>
 
           <div>
-            <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-              Apply Global Rate (₹ per credit)
+            <label htmlFor="global-rate" className="block text-[11px] font-semibold text-slate-600 mb-1">
+              Global Rate (₹)
             </label>
             <div className="flex gap-1.5">
               <input
+                id="global-rate"
                 type="number"
+                min="0"
                 step="0.0001"
                 value={globalRate}
                 onChange={(e) => setGlobalRate(e.target.value)}
-                className="w-24 text-xs rounded border border-slate-300 p-1.5 font-mono font-bold"
+                className="w-full min-w-0 text-xs rounded border border-slate-300 p-1.5 font-mono font-bold"
               />
               <button
                 onClick={applyGlobalRate}
-                className="text-[11px] px-2 py-1 bg-slate-200 hover:bg-slate-300 rounded font-medium text-slate-700"
+                className="text-[11px] px-2 py-1 bg-slate-200 hover:bg-slate-300 rounded font-medium text-slate-700 whitespace-nowrap"
               >
-                Apply to Selected
+                Apply
               </button>
             </div>
           </div>
 
           <div>
-            <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+            <label htmlFor="bulk-invoice-date" className="block text-[11px] font-semibold text-slate-600 mb-1">
               Invoice Date
             </label>
             <input
+              id="bulk-invoice-date"
               type="date"
               value={invoiceDate}
-              onChange={(e) => {
-                setInvoiceDate(e.target.value);
-                setDueDate(e.target.value);
-              }}
+              onChange={(e) => handleInvoiceDateChange(e.target.value)}
               className="w-full text-xs rounded border border-slate-300 p-1.5"
             />
           </div>
 
           <div>
-            <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+            <label htmlFor="bulk-due-date" className="block text-[11px] font-semibold text-slate-600 mb-1">
               Due Date
             </label>
             <input
+              id="bulk-due-date"
               type="date"
               value={dueDate}
               onChange={(e) => setDueDate(e.target.value)}
@@ -490,10 +685,9 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
         </div>
       </div>
 
-      {/* Batch Client Table */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="p-4 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
+        <div className="p-3 sm:p-4 bg-slate-900 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={toggleSelectAll}
               className="flex items-center gap-1.5 text-xs font-semibold hover:text-orange-300 transition-colors"
@@ -506,28 +700,23 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
               <span>Select All ({rows.length})</span>
             </button>
             <span className="text-xs text-slate-400 font-medium">
-              | {selectedCount} of {rows.length} clients selected
+              {selectedCount} selected
             </span>
           </div>
 
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleGenerateInvoices}
-              disabled={isGenerating || selectedCount === 0}
-              className="flex items-center gap-2 bg-gradient-to-r from-orange-500 to-amber-600 hover:from-orange-600 hover:to-amber-700 disabled:opacity-50 text-white text-xs font-bold py-2 px-4 rounded-lg shadow-md transition-all"
-            >
-              <Play className="w-4 h-4 fill-current" />
-              <span>
-                {isGenerating
-                  ? 'Generating Invoices...'
-                  : `Generate Invoices in One Go (${selectedCount} Clients)`}
-              </span>
-            </button>
-          </div>
+          <button
+            onClick={handleGenerateInvoices}
+            disabled={isGenerating || selectedCount === 0}
+            className="flex items-center justify-center gap-2 bg-gradient-to-r from-orange-500 to-amber-600 hover:from-orange-600 hover:to-amber-700 disabled:opacity-50 text-white text-xs font-bold py-2 px-4 rounded-lg shadow-md transition-all"
+          >
+            <Play className="w-4 h-4 fill-current" />
+            <span>
+              {isGenerating ? 'Generating…' : `Generate Invoices (${selectedCount})`}
+            </span>
+          </button>
         </div>
 
-        {/* Scrollable Table */}
-        <div className="overflow-x-auto">
+        <div className="hidden lg:block overflow-x-auto">
           <table className="w-full text-left text-xs border-collapse">
             <thead>
               <tr className="bg-slate-100 text-slate-700 font-bold border-b border-slate-200">
@@ -536,190 +725,346 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
                 <th className="p-2.5 w-[15%]">State & Tax Mode</th>
                 <th className="p-2.5 w-[12%] text-right">Credits Used</th>
                 <th className="p-2.5 w-[12%] text-right">Rate (₹)</th>
-                <th className="p-2.5 w-[14%] text-right">Tax (CGST/SGST/IGST)</th>
-                <th className="p-2.5 w-[15%] text-right">Total (₹)</th>
+                <th className="p-2.5 w-[14%] text-right">GST Breakdown</th>
+                <th className="p-2.5 w-[13%] text-right">Total (₹)</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200">
-              {rows.map((row, idx) => {
-                const item = {
-                  id: `dummy_${idx}`,
-                  sl_no: 1,
-                  service_title: 'WhatsApp Business API',
-                  service_description: row.messageType,
-                  hsn_sac: '998314',
-                  due_on: formatDateForDisplay(invoiceDate),
-                  quantity: row.credits,
-                  rate: row.rate,
-                  per: 'NOS',
-                  amount: Number((row.credits * row.rate).toFixed(4)),
-                };
-                const calc = calculateInvoiceTotals([item], row.taxMode);
+              {rows.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="text-center p-8 text-slate-400">
+                    No clients loaded. Add clients in the Client Directory or upload a CSV.
+                  </td>
+                </tr>
+              ) : (
+                rows.map((row, index) => {
+                  const item = {
+                    id: `row_${index}`,
+                    sl_no: 1,
+                    service_title: 'WhatsApp Business API',
+                    service_description: row.messageType,
+                    hsn_sac: companySettings.default_hsn || '998314',
+                    due_on: formattedInvoiceDate,
+                    quantity: row.credits,
+                    rate: row.rate,
+                    per: 'NOS',
+                    amount: Number((row.credits * row.rate).toFixed(4)),
+                  };
+                  const calc = calculateInvoiceTotals([item], row.taxMode);
+                  const rowError = row.errorMsg || rowValidationError(row);
 
-                return (
-                  <tr
-                    key={idx}
-                    className={`hover:bg-slate-50 transition-colors ${
-                      row.selected ? 'bg-orange-50/20' : 'opacity-70'
-                    }`}
-                  >
-                    {/* Checkbox */}
-                    <td className="p-2.5 text-center">
-                      <input
-                        type="checkbox"
-                        checked={row.selected}
-                        onChange={() => toggleRowSelect(idx)}
-                        className="rounded border-slate-300 text-orange-600 focus:ring-orange-500 w-4 h-4 cursor-pointer"
-                      />
-                    </td>
+                  return (
+                    <tr
+                      key={index}
+                      className={`transition-colors align-top ${
+                        row.selected ? 'bg-orange-50/20' : 'opacity-70'
+                      }`}
+                    >
+                      <td className="p-2.5 text-center">
+                        <input
+                          type="checkbox"
+                          checked={row.selected}
+                          onChange={() => toggleRowSelect(index)}
+                          aria-label={`Select ${row.clientName}`}
+                          className="rounded border-slate-300 text-orange-600 focus:ring-orange-500 w-4 h-4 cursor-pointer"
+                        />
+                      </td>
 
-                    {/* Client Name & Reference */}
-                    <td className="p-2.5">
-                      <input
-                        type="text"
-                        value={row.clientName}
-                        onChange={(e) => updateRow(idx, 'clientName', e.target.value)}
-                        className="w-full font-bold text-slate-800 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-orange-500 focus:bg-white p-1 rounded text-xs focus:outline-none"
-                      />
-                      <div className="text-[10px] text-slate-500 flex items-center gap-1.5 mt-0.5">
-                        <span className="bg-slate-100 text-slate-600 px-1.5 py-0.2 rounded border border-slate-200">
-                          {row.category}
-                        </span>
-                        {row.gstin && (
-                          <span className="font-mono text-slate-600">GST: {row.gstin}</span>
+                      <td className="p-2.5">
+                        <input
+                          type="text"
+                          value={row.clientName}
+                          onChange={(e) => updateRow(index, 'clientName', e.target.value)}
+                          aria-label={`Client name row ${index + 1}`}
+                          className="w-full font-bold text-slate-800 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-orange-500 focus:bg-white p-1 rounded text-xs focus:outline-none"
+                        />
+                        <div className="text-[10px] text-slate-500 flex flex-wrap items-center gap-1.5 mt-0.5">
+                          <span className="bg-slate-100 text-slate-600 px-1.5 py-0.2 rounded border border-slate-200">
+                            {row.category}
+                          </span>
+                          {row.gstin && (
+                            <span className="font-mono text-slate-600 break-all">GST: {row.gstin}</span>
+                          )}
+                        </div>
+                        <div className="mt-1">
+                          <span className="text-[9.5px] font-mono font-bold text-orange-700 bg-orange-100/70 border border-orange-200/90 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                            PI preview: {row.voucherNo || previewPiNumbers.get(index) || '—'}
+                          </span>
+                        </div>
+                        {rowError && (
+                          <p className="mt-1 text-[10px] font-medium text-red-600">{rowError}</p>
                         )}
-                      </div>
-                      <div className="mt-1">
-                        <span className="text-[9.5px] font-mono font-bold text-orange-700 bg-orange-100/70 border border-orange-200/90 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                          PI: {previewPiNumbers[idx]}
-                        </span>
-                      </div>
-                    </td>
+                      </td>
 
-                    {/* State & Tax Mode Toggle */}
-                    <td className="p-2.5">
-                      <div className="flex items-center gap-1">
+                      <td className="p-2.5">
                         <select
                           value={row.stateName}
                           onChange={(e) => {
-                            const newSt = e.target.value;
-                            const found = INDIAN_STATES.find(s => s.name === newSt);
-                            const code = found ? found.code : '23';
-                            updateRow(idx, 'stateName', newSt);
-                            updateRow(idx, 'stateCode', code);
-                            updateRow(idx, 'taxMode', determineTaxMode(code, companySettings.state_code));
+                            const newState = INDIAN_STATES.find(s => s.name === e.target.value);
+                            const code = newState?.code || '23';
+                            setRows(prev => {
+                              const copy = [...prev];
+                              copy[index] = {
+                                ...copy[index],
+                                stateName: newState?.name || 'Madhya Pradesh',
+                                stateCode: code,
+                                taxMode: taxModeFor(code, companySettings.state_code),
+                                errorMsg: undefined,
+                                voucherNo: undefined,
+                                status: 'pending',
+                              };
+                              return copy;
+                            });
                           }}
-                          className="text-[11px] rounded border border-slate-300 p-1 bg-white focus:outline-none"
+                          aria-label={`Buyer state row ${index + 1}`}
+                          className="text-[11px] rounded border border-slate-300 p-1 bg-white focus:outline-none w-full"
                         >
-                          {INDIAN_STATES.map(s => (
-                            <option key={s.code} value={s.name}>
-                              {s.name} ({s.code})
+                          {INDIAN_STATES.map(state => (
+                            <option key={state.code} value={state.name}>
+                              {state.name} ({state.code})
                             </option>
                           ))}
                         </select>
-                      </div>
-
-                      {/* Tax Mode Option Pill */}
-                      <div className="flex gap-1 mt-1">
-                        <button
-                          type="button"
-                          onClick={() => updateRow(idx, 'taxMode', 'CGST_SGST')}
-                          className={`text-[9.5px] px-1.5 py-0.5 rounded font-bold transition-all border ${
-                            row.taxMode === 'CGST_SGST'
-                              ? 'bg-blue-600 text-white border-blue-600'
-                              : 'bg-slate-100 text-slate-600 border-slate-300 hover:bg-slate-200'
-                          }`}
-                        >
-                          CGST+SGST (9%+9%)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => updateRow(idx, 'taxMode', 'IGST')}
-                          className={`text-[9.5px] px-1.5 py-0.5 rounded font-bold transition-all border ${
-                            row.taxMode === 'IGST'
-                              ? 'bg-purple-600 text-white border-purple-600'
-                              : 'bg-slate-100 text-slate-600 border-slate-300 hover:bg-slate-200'
-                          }`}
-                        >
-                          IGST (18%)
-                        </button>
-                      </div>
-                    </td>
-
-                    {/* Credits Quantity */}
-                    <td className="p-2.5 text-right">
-                      <input
-                        type="number"
-                        value={row.credits}
-                        onChange={(e) => updateRow(idx, 'credits', parseFloat(e.target.value) || 0)}
-                        className="w-24 text-right font-mono font-bold text-slate-800 border border-slate-300 rounded p-1 text-xs focus:ring-1 focus:ring-orange-500 focus:outline-none"
-                      />
-                    </td>
-
-                    {/* Rate */}
-                    <td className="p-2.5 text-right">
-                      <input
-                        type="number"
-                        step="0.0001"
-                        value={row.rate}
-                        onChange={(e) => updateRow(idx, 'rate', parseFloat(e.target.value) || 0)}
-                        className="w-20 text-right font-mono font-bold text-orange-700 border border-slate-300 rounded p-1 text-xs focus:ring-1 focus:ring-orange-500 focus:outline-none"
-                      />
-                    </td>
-
-                    {/* Taxes breakdown */}
-                    <td className="p-2.5 text-right font-mono text-[11px]">
-                      {row.taxMode === 'CGST_SGST' ? (
-                        <div className="text-slate-600">
-                          <div>CGST 9%: ₹{calc.cgstAmount.toFixed(2)}</div>
-                          <div>SGST 9%: ₹{calc.sgstAmount.toFixed(2)}</div>
+                        <div className="mt-1 text-[10px] font-bold">
+                          <span
+                            className={
+                              row.taxMode === 'CGST_SGST' ? 'text-blue-700' : 'text-purple-700'
+                            }
+                          >
+                            {row.taxMode === 'CGST_SGST' ? 'CGST+SGST' : 'IGST'}
+                          </span>
+                          <span className="text-slate-400"> · auto from state code {row.stateCode}</span>
                         </div>
-                      ) : (
-                        <div className="text-purple-700 font-semibold">
-                          IGST 18%: ₹{calc.igstAmount.toFixed(2)}
-                        </div>
-                      )}
-                    </td>
+                      </td>
 
-                    {/* Grand Total */}
-                    <td className="p-2.5 text-right font-mono font-bold text-slate-900 text-xs">
-                      ₹ {calc.totalAmount.toFixed(2)}
-                    </td>
-                  </tr>
-                );
-              })}
+                      <td className="p-2.5 text-right">
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={row.credits}
+                          onChange={(e) => updateRow(index, 'credits', Number(e.target.value) || 0)}
+                          aria-label={`Credits row ${index + 1}`}
+                          className="w-24 max-w-full text-right font-mono font-bold text-slate-800 border border-slate-300 rounded p-1 text-xs focus:ring-1 focus:ring-orange-500 focus:outline-none"
+                        />
+                      </td>
+
+                      <td className="p-2.5 text-right">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.0001"
+                          value={row.rate}
+                          onChange={(e) => updateRow(index, 'rate', Number(e.target.value) || 0)}
+                          aria-label={`Rate row ${index + 1}`}
+                          className="w-20 max-w-full text-right font-mono font-bold text-orange-700 border border-slate-300 rounded p-1 text-xs focus:ring-1 focus:ring-orange-500 focus:outline-none"
+                        />
+                      </td>
+
+                      <td className="p-2.5 text-right font-mono text-[11px]">
+                        {row.taxMode === 'CGST_SGST' ? (
+                          <div className="text-slate-600">
+                            <div>CGST: ₹{calc.cgstAmount.toFixed(2)}</div>
+                            <div>SGST: ₹{calc.sgstAmount.toFixed(2)}</div>
+                          </div>
+                        ) : (
+                          <div className="text-purple-700 font-semibold">
+                            IGST: ₹{calc.igstAmount.toFixed(2)}
+                          </div>
+                        )}
+                      </td>
+
+                      <td className="p-2.5 text-right font-mono font-bold text-slate-900 text-xs">
+                        ₹ {calc.totalAmount.toFixed(2)}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
             </tbody>
           </table>
         </div>
+
+        <div className="lg:hidden divide-y divide-slate-200">
+          {rows.length === 0 ? (
+            <p className="p-6 text-center text-xs text-slate-400">
+              No clients loaded. Add clients in the Client Directory or upload a CSV.
+            </p>
+          ) : (
+            rows.map((row, index) => {
+              const item = {
+                id: `row_mobile_${index}`,
+                sl_no: 1,
+                service_title: 'WhatsApp Business API',
+                service_description: row.messageType,
+                hsn_sac: companySettings.default_hsn || '998314',
+                due_on: formattedInvoiceDate,
+                quantity: row.credits,
+                rate: row.rate,
+                per: 'NOS',
+                amount: Number((row.credits * row.rate).toFixed(4)),
+              };
+              const calc = calculateInvoiceTotals([item], row.taxMode);
+              const rowError = row.errorMsg || rowValidationError(row);
+
+              return (
+                <div key={index} className={`p-4 space-y-3 ${row.selected ? 'bg-orange-50/20' : 'opacity-75'}`}>
+                  <div className="flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      checked={row.selected}
+                      onChange={() => toggleRowSelect(index)}
+                      aria-label={`Select ${row.clientName}`}
+                      className="mt-1 rounded border-slate-300 text-orange-600 focus:ring-orange-500 w-4 h-4"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <input
+                        type="text"
+                        value={row.clientName}
+                        onChange={(e) => updateRow(index, 'clientName', e.target.value)}
+                        aria-label={`Client name row ${index + 1}`}
+                        className="w-full font-bold text-slate-900 text-sm bg-transparent border-b border-slate-300 p-1 focus:border-orange-500 focus:outline-none"
+                      />
+                      <div className="mt-1 text-[10px] font-mono text-orange-700 break-all">
+                        PI preview: {row.voucherNo || previewPiNumbers.get(index) || '—'}
+                      </div>
+                      {row.gstin && (
+                        <div className="text-[10px] font-mono text-slate-500 break-all">
+                          GST: {row.gstin}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                        State
+                      </label>
+                      <select
+                        value={row.stateName}
+                        onChange={(e) => {
+                          const newState = INDIAN_STATES.find(s => s.name === e.target.value);
+                          const code = newState?.code || '23';
+                          setRows(prev => {
+                            const copy = [...prev];
+                            copy[index] = {
+                              ...copy[index],
+                              stateName: newState?.name || 'Madhya Pradesh',
+                              stateCode: code,
+                              taxMode: taxModeFor(code, companySettings.state_code),
+                              errorMsg: undefined,
+                              voucherNo: undefined,
+                              status: 'pending',
+                            };
+                            return copy;
+                          });
+                        }}
+                        className="w-full text-[11px] rounded border border-slate-300 p-1.5 bg-white"
+                      >
+                        {INDIAN_STATES.map(state => (
+                          <option key={state.code} value={state.name}>
+                            {state.name} ({state.code})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex items-end">
+                      <span
+                        className={`text-[10px] font-bold px-2 py-1 rounded-full ${
+                          row.taxMode === 'CGST_SGST'
+                            ? 'bg-blue-100 text-blue-800'
+                            : 'bg-purple-100 text-purple-800'
+                        }`}
+                      >
+                        {row.taxMode === 'CGST_SGST' ? 'CGST+SGST' : 'IGST'}
+                      </span>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                        Credits
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        value={row.credits}
+                        onChange={(e) => updateRow(index, 'credits', Number(e.target.value) || 0)}
+                        className="w-full text-xs font-mono font-bold rounded border border-slate-300 p-1.5"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                        Rate (₹)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.0001"
+                        value={row.rate}
+                        onChange={(e) => updateRow(index, 'rate', Number(e.target.value) || 0)}
+                        className="w-full text-xs font-mono font-bold text-orange-700 rounded border border-slate-300 p-1.5"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg bg-white border border-slate-200 p-2 text-[11px] font-mono space-y-1">
+                    {row.taxMode === 'CGST_SGST' ? (
+                      <>
+                        <div className="flex justify-between text-blue-700">
+                          <span>CGST</span>
+                          <span>₹ {calc.cgstAmount.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between text-blue-700">
+                          <span>SGST</span>
+                          <span>₹ {calc.sgstAmount.toFixed(2)}</span>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="flex justify-between text-purple-700">
+                        <span>IGST</span>
+                        <span>₹ {calc.igstAmount.toFixed(2)}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between border-t pt-1 font-bold text-slate-900">
+                      <span>Total</span>
+                      <span>₹ {calc.totalAmount.toFixed(2)}</span>
+                    </div>
+                  </div>
+
+                  {rowError && <p className="text-[10px] font-medium text-red-600">{rowError}</p>}
+                </div>
+              );
+            })
+          )}
+        </div>
       </div>
 
-      {/* Results / Generated Invoices Drawer / Section */}
       {generatedInvoices.length > 0 && (
-        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 space-y-4">
+        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 sm:p-5 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-6 h-6 text-emerald-600" />
+              <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0" />
               <div>
                 <h3 className="text-sm font-bold text-emerald-950">
-                  Successfully Generated {generatedInvoices.length} Invoices!
+                  Generated {generatedInvoices.length} invoice{generatedInvoices.length === 1 ? '' : 's'}
                 </h3>
                 <p className="text-xs text-emerald-800">
-                  All invoices created, numbered sequentially, and recorded in history.
+                  Saved with server-assigned voucher numbers. Download individual PDFs or a ZIP.
                 </p>
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleDownloadAllZip}
-                disabled={isZipping}
-                className="flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold py-2 px-3.5 rounded-lg shadow-sm transition-colors"
-              >
-                <FolderArchive className="w-4 h-4" />
-                <span>{isZipping ? 'Creating ZIP...' : 'Download All as ZIP'}</span>
-              </button>
-            </div>
+            <button
+              onClick={handleDownloadAllZip}
+              disabled={isZipping}
+              className="flex items-center justify-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white text-xs font-bold py-2 px-3.5 rounded-lg shadow-sm transition-colors"
+            >
+              <FolderArchive className="w-4 h-4" />
+              <span>{isZipping ? 'Creating ZIP…' : 'Download All as ZIP'}</span>
+            </button>
           </div>
 
           {zipProgress && (
@@ -728,35 +1073,37 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
             </div>
           )}
 
-          {/* Grid of Generated Invoices */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-            {generatedInvoices.map((inv) => (
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+            {generatedInvoices.map(invoice => (
               <div
-                key={inv.id}
+                key={invoice.id}
                 className="bg-white rounded-lg border border-emerald-300 p-3 shadow-sm hover:shadow-md transition-shadow flex flex-col justify-between"
               >
                 <div>
-                  <div className="flex items-center justify-between text-xs font-mono font-bold text-orange-700">
-                    <span>{inv.voucher_no}</span>
-                    <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded">
-                      {inv.tax_mode === 'CGST_SGST' ? 'CGST+SGST' : 'IGST'}
+                  <div className="flex items-start justify-between gap-2 text-xs font-mono font-bold text-orange-700">
+                    <span className="break-all">{invoice.voucher_no}</span>
+                    <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded shrink-0">
+                      {invoice.tax_mode === 'CGST_SGST' ? 'CGST+SGST' : 'IGST'}
                     </span>
                   </div>
-                  <div className="font-bold text-slate-800 text-xs mt-1 truncate">
-                    {inv.buyer_name}
+                  <div className="font-bold text-slate-800 text-xs mt-1 break-words">
+                    {invoice.buyer_name}
                   </div>
                   <div className="text-[11px] text-slate-500 mt-0.5">
-                    Credits: {(inv.total_quantity || 0).toLocaleString()} | Total: <span className="font-bold text-slate-900">₹{inv.total_amount.toFixed(2)}</span>
+                    Credits: {(Number(invoice.total_quantity) || 0).toLocaleString()} · Total:{' '}
+                    <span className="font-bold text-slate-900">
+                      ₹ {Number(invoice.total_amount).toFixed(2)}
+                    </span>
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2 mt-3 pt-2 border-t border-slate-100">
                   <button
-                    onClick={() => setPreviewInvoice(inv)}
+                    onClick={() => setPreviewInvoice(invoice)}
                     className="flex-1 flex items-center justify-center gap-1 text-[11px] font-semibold text-slate-700 hover:text-orange-600 bg-slate-50 hover:bg-slate-100 py-1.5 rounded transition-colors border border-slate-200"
                   >
                     <Eye className="w-3.5 h-3.5" />
-                    <span>View Replica</span>
+                    <span>View Invoice</span>
                   </button>
                 </div>
               </div>
@@ -765,50 +1112,46 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
         </div>
       )}
 
-      {/* Modal: View Single Invoice Replica from Batch */}
       {previewInvoice && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden">
-            <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-900 text-white">
-              <div>
-                <h3 className="text-sm font-bold">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl sm:rounded-2xl shadow-2xl max-w-4xl w-full max-h-[94vh] flex flex-col overflow-hidden">
+            <div className="p-3 sm:p-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-slate-900 text-white">
+              <div className="min-w-0">
+                <h3 className="text-xs sm:text-sm font-bold break-all">
                   Proforma Invoice: {previewInvoice.voucher_no}
                 </h3>
-                <p className="text-xs text-slate-400">
-                  {previewInvoice.buyer_name} • Tax Mode: {previewInvoice.tax_mode}
+                <p className="text-[11px] text-slate-400">
+                  {previewInvoice.buyer_name} • {previewInvoice.tax_mode === 'IGST' ? 'IGST' : 'CGST+SGST'}
                 </p>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 <button
-                  onClick={() => {
-                    const cleanBuyer = previewInvoice.buyer_name.replace(/[^a-zA-Z0-9]/g, '_');
-                    const cleanVoucher = previewInvoice.voucher_no.replace(/[^a-zA-Z0-9]/g, '_');
-                    exportElementToPdf('modal-invoice-replica', `Invoice_${cleanVoucher}_${cleanBuyer}.pdf`);
-                  }}
-                  className="flex items-center gap-1.5 bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold py-1.5 px-3 rounded-lg transition-colors"
+                  onClick={handleDownloadPreviewPdf}
+                  className="flex items-center gap-1.5 bg-orange-600 hover:bg-orange-700 text-white text-xs font-semibold py-1.5 px-2.5 rounded-lg transition-colors"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Download PDF</span>
+                  PDF
                 </button>
                 <button
                   onClick={() => window.print()}
-                  className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold py-1.5 px-3 rounded-lg transition-colors"
+                  className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold py-1.5 px-2.5 rounded-lg transition-colors"
                 >
                   <Printer className="w-3.5 h-3.5" />
-                  <span>Print</span>
+                  Print
                 </button>
                 <button
                   onClick={() => setPreviewInvoice(null)}
                   className="text-slate-400 hover:text-white p-1 rounded-lg"
+                  aria-label="Close invoice preview"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
             </div>
 
-            <div className="p-6 overflow-y-auto bg-slate-100 flex justify-center">
-              <div className="bg-white p-2 shadow-lg">
+            <div className="p-2 sm:p-6 overflow-auto bg-slate-100 flex justify-center">
+              <div className="bg-white p-1 sm:p-2 shadow-lg">
                 <InvoiceTemplate
                   id="modal-invoice-replica"
                   invoice={previewInvoice}
@@ -820,17 +1163,23 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
         </div>
       )}
 
-      {/* Hidden offscreen container for rendering batch PDFs into zip */}
-      <div id="bulk-offscreen-render" style={{ position: 'absolute', left: '-9999px', top: '-9999px' }}>
-        {previewInvoice && (
-          <div id="bulk-single-pdf-render" style={{ width: '800px', backgroundColor: '#ffffff' }}>
-            <InvoiceTemplate
-              invoice={previewInvoice}
-              companySettings={companySettings}
-            />
-          </div>
-        )}
-      </div>
+      {generatedInvoices.length > 0 && (
+        <div
+          id="bulk-offscreen-render"
+          aria-hidden="true"
+          style={{ position: 'absolute', left: '-9999px', top: 0, width: '820px' }}
+        >
+          {generatedInvoices.map((invoice, index) => (
+            <div
+              key={invoice.id}
+              id={`bulk-pdf-${index}`}
+              style={{ width: '820px', backgroundColor: '#ffffff' }}
+            >
+              <InvoiceTemplate invoice={invoice} companySettings={companySettings} />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };

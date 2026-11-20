@@ -1,5 +1,5 @@
-// Centralized Environment & App Configuration
-// Ensures zero hardcoded endpoints across Cloudflare (Frontend) and Render (Backend)
+// Centralized environment and app configuration.
+// No backend or Supabase endpoint is hardcoded; every URL comes from env vars.
 
 export interface AppConfig {
   apiUrl: string;
@@ -8,24 +8,43 @@ export interface AppConfig {
   supabaseAnonKey: string;
   hasSupabaseConfigured: boolean;
   isProduction: boolean;
+  isDevelopment: boolean;
   appVersion: string;
 }
 
+function sanitizeUrl(value: string | undefined): string {
+  const raw = (value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return '';
+    return `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
 export function getAppConfig(): AppConfig {
-  // NEXT_PUBLIC_API_URL: If set, calls the Render backend.
-  // If empty, legacy localStorage/direct-Supabase mode is used for local development.
-  const rawApiUrl = process.env.NEXT_PUBLIC_API_URL || '';
-  const apiUrl = rawApiUrl.replace(/\/+$/, ''); // Strip trailing slashes
+  // NEXT_PUBLIC_API_URL: if set, every read/write goes through the backend.
+  const apiUrl = sanitizeUrl(process.env.NEXT_PUBLIC_API_URL);
   const isBackendExternal = apiUrl.length > 0 && !apiUrl.startsWith('/');
 
-  const supabaseUrl = (process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim();
-  const supabaseAnonKey = (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '').trim();
+  const supabaseUrl = sanitizeUrl(process.env.NEXT_PUBLIC_SUPABASE_URL);
+  // Supports both the legacy anon key name and the newer publishable key name.
+  const supabaseAnonKey = (
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    ''
+  ).trim();
+
   const hasSupabaseConfigured = Boolean(
-    supabaseUrl && 
-    supabaseAnonKey && 
-    !supabaseUrl.includes('placeholder') &&
-    supabaseUrl.startsWith('http')
+    supabaseUrl &&
+      supabaseAnonKey &&
+      !supabaseUrl.includes('placeholder') &&
+      !supabaseAnonKey.toLowerCase().includes('placeholder')
   );
+
+  const isProduction = process.env.NODE_ENV === 'production';
 
   return {
     apiUrl,
@@ -33,8 +52,9 @@ export function getAppConfig(): AppConfig {
     supabaseUrl,
     supabaseAnonKey,
     hasSupabaseConfigured,
-    isProduction: process.env.NODE_ENV === 'production',
-    appVersion: '1.1.0',
+    isProduction,
+    isDevelopment: !isProduction,
+    appVersion: '1.2.0',
   };
 }
 

@@ -1,34 +1,29 @@
 import { Client, CompanySettings, Invoice, MonthlyCreditUsage } from './types';
-import { defaultCompanySettings, initialClients, initialInvoices, initialMonthlyUsage } from './mockData';
-import { getSupabase } from './supabase';
+import { defaultCompanySettings } from './mockData';
 import { config } from './config';
-import { api } from './api';
-import { 
-  generateNextUniquePiNumber, 
-  generateBatchUniquePiNumbers, 
-  extractSequenceNumber 
-} from './piNumberUtils';
+import { api, ApiError } from './api';
 
-// When NEXT_PUBLIC_API_URL is set, every read/write goes through the Render
-// backend (which owns Supabase + validation). Otherwise the legacy direct
-// Supabase/localStorage paths stay available for offline/local development.
+// Production is API-only. The browser never writes directly to Supabase, so
+// validation, voucher numbering, and usage reconciliation cannot be bypassed.
 const isApiEnabled = (): boolean => Boolean(config.apiUrl);
+
+function requireProductionApi(): void {
+  if (config.isProduction) {
+    throw new ApiError('Backend API URL is not configured (NEXT_PUBLIC_API_URL)', 0);
+  }
+}
 
 const CLIENTS_KEY = 'waba_clients';
 const INVOICES_KEY = 'waba_invoices';
 const USAGE_KEY = 'waba_monthly_usage';
 const SETTINGS_KEY = 'waba_settings';
 
-// Helper to safely get from localStorage
 function getLocal<T>(key: string, fallback: T): T {
   if (typeof window === 'undefined') return fallback;
   try {
     const raw = localStorage.getItem(key);
-    if (!raw) {
-      localStorage.setItem(key, JSON.stringify(fallback));
-      return fallback;
-    }
-    return JSON.parse(raw);
+    if (!raw) return fallback;
+    return JSON.parse(raw) as T;
   } catch {
     return fallback;
   }
@@ -36,27 +31,14 @@ function getLocal<T>(key: string, fallback: T): T {
 
 function setLocal<T>(key: string, value: T): void {
   if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch (err) {
-    console.error(`Error saving to localStorage key ${key}:`, err);
-  }
+  localStorage.setItem(key, JSON.stringify(value));
 }
 
 export const db = {
   // Settings
   async getSettings(): Promise<CompanySettings> {
     if (isApiEnabled()) return api.getSettings();
-
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        const { data, error } = await sb.from('company_settings').select('*').limit(1).maybeSingle();
-        if (!error && data) return data as CompanySettings;
-      } catch (e) {
-        console.warn('Supabase getSettings error, falling back to local', e);
-      }
-    }
+    requireProductionApi();
     return getLocal<CompanySettings>(SETTINGS_KEY, defaultCompanySettings);
   },
 
@@ -65,69 +47,15 @@ export const db = {
       await api.saveSettings(settings);
       return;
     }
-
+    requireProductionApi();
     setLocal(SETTINGS_KEY, settings);
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        await sb.from('company_settings').upsert({ id: 'primary', ...settings });
-      } catch (e) {
-        console.warn('Supabase saveSettings error', e);
-      }
-    }
-  },
-
-  async getNextVoucherNo(invoiceDate?: string): Promise<string> {
-    const settings = await this.getSettings();
-    const invoices = await this.getInvoices();
-    const nextPi = generateNextUniquePiNumber(
-      invoices,
-      settings.voucher_prefix || 'NRT/PI/26-27/',
-      invoiceDate,
-      settings.current_voucher_seq || 242
-    );
-    const seq = extractSequenceNumber(nextPi);
-    if (seq) {
-      await this.saveSettings({ ...settings, current_voucher_seq: seq });
-    }
-    return nextPi;
-  },
-
-  async getNextBatchVoucherNos(count: number, invoiceDate?: string): Promise<string[]> {
-    if (count <= 0) return [];
-    const settings = await this.getSettings();
-    const invoices = await this.getInvoices();
-    const batch = generateBatchUniquePiNumbers(
-      invoices,
-      count,
-      settings.voucher_prefix || 'NRT/PI/26-27/',
-      invoiceDate,
-      settings.current_voucher_seq || 242
-    );
-    const lastPi = batch[batch.length - 1];
-    if (lastPi) {
-      const seq = extractSequenceNumber(lastPi);
-      if (seq) {
-        await this.saveSettings({ ...settings, current_voucher_seq: seq });
-      }
-    }
-    return batch;
   },
 
   // Clients
   async getClients(): Promise<Client[]> {
     if (isApiEnabled()) return api.getClients();
-
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        const { data, error } = await sb.from('clients').select('*').order('name');
-        if (!error && data && data.length > 0) return data as Client[];
-      } catch (e) {
-        console.warn('Supabase getClients error, falling back to local', e);
-      }
-    }
-    return getLocal<Client[]>(CLIENTS_KEY, initialClients);
+    requireProductionApi();
+    return getLocal<Client[]>(CLIENTS_KEY, []);
   },
 
   async saveClient(client: Client): Promise<void> {
@@ -135,26 +63,14 @@ export const db = {
       await api.saveClient(client);
       return;
     }
+    requireProductionApi();
 
-    const clients = await this.getClients();
+    const clients = getLocal<Client[]>(CLIENTS_KEY, []);
     const existingIndex = clients.findIndex(c => c.id === client.id);
-    let updated: Client[];
-    if (existingIndex >= 0) {
-      updated = [...clients];
-      updated[existingIndex] = client;
-    } else {
-      updated = [client, ...clients];
-    }
+    const updated = [...clients];
+    if (existingIndex >= 0) updated[existingIndex] = client;
+    else updated.unshift(client);
     setLocal(CLIENTS_KEY, updated);
-
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        await sb.from('clients').upsert(client);
-      } catch (e) {
-        console.warn('Supabase saveClient error', e);
-      }
-    }
   },
 
   async saveClientsBatch(newClients: Client[]): Promise<void> {
@@ -162,22 +78,12 @@ export const db = {
       await api.saveClientsBatch(newClients);
       return;
     }
+    requireProductionApi();
 
-    const current = await this.getClients();
     const map = new Map<string, Client>();
-    current.forEach(c => map.set(c.id, c));
+    getLocal<Client[]>(CLIENTS_KEY, []).forEach(c => map.set(c.id, c));
     newClients.forEach(c => map.set(c.id, c));
-    const merged = Array.from(map.values());
-    setLocal(CLIENTS_KEY, merged);
-
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        await sb.from('clients').upsert(newClients);
-      } catch (e) {
-        console.warn('Supabase saveClientsBatch error', e);
-      }
-    }
+    setLocal(CLIENTS_KEY, Array.from(map.values()));
   },
 
   async deleteClient(id: string): Promise<void> {
@@ -185,104 +91,88 @@ export const db = {
       await api.deleteClient(id);
       return;
     }
+    requireProductionApi();
 
-    const clients = await this.getClients();
-    const updated = clients.filter(c => c.id !== id);
+    const updated = getLocal<Client[]>(CLIENTS_KEY, []).filter(c => c.id !== id);
     setLocal(CLIENTS_KEY, updated);
-
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        await sb.from('clients').delete().eq('id', id);
-      } catch (e) {
-        console.warn('Supabase deleteClient error', e);
-      }
-    }
   },
 
   // Invoices
   async getInvoices(): Promise<Invoice[]> {
     if (isApiEnabled()) return api.getInvoices();
-
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        const { data, error } = await sb.from('invoices').select('*').order('created_at', { ascending: false });
-        if (!error && data && data.length > 0) return data as Invoice[];
-      } catch (e) {
-        console.warn('Supabase getInvoices error, falling back to local', e);
-      }
-    }
-    return getLocal<Invoice[]>(INVOICES_KEY, initialInvoices);
+    requireProductionApi();
+    return getLocal<Invoice[]>(INVOICES_KEY, []);
   },
 
-  async saveInvoice(invoice: Invoice): Promise<void> {
-    if (isApiEnabled()) {
-      await api.saveInvoice(invoice);
-      return;
-    }
+  async saveInvoice(invoice: Invoice): Promise<Invoice> {
+    if (isApiEnabled()) return api.saveInvoice(invoice);
+    requireProductionApi();
 
-    const invoices = await this.getInvoices();
-    const idx = invoices.findIndex(i => i.id === invoice.id || i.voucher_no === invoice.voucher_no);
-    let updated: Invoice[];
-    if (idx >= 0) {
-      updated = [...invoices];
-      updated[idx] = invoice;
-    } else {
-      updated = [invoice, ...invoices];
-    }
+    const invoices = getLocal<Invoice[]>(INVOICES_KEY, []);
+    const idx = invoices.findIndex(i => i.id === invoice.id);
+    const updated = [...invoices];
+    if (idx >= 0) updated[idx] = invoice;
+    else updated.unshift(invoice);
+    setLocal(INVOICES_KEY, updated);
+    return invoice;
+  },
+
+  async updateInvoice(invoice: Invoice): Promise<Invoice> {
+    if (isApiEnabled()) return api.updateInvoice(invoice);
+    requireProductionApi();
+
+    const invoices = getLocal<Invoice[]>(INVOICES_KEY, []);
+    const idx = invoices.findIndex(i => i.id === invoice.id);
+    if (idx < 0) throw new ApiError('Invoice not found', 404);
+    const updated = [...invoices];
+    updated[idx] = invoice;
+    setLocal(INVOICES_KEY, updated);
+    return invoice;
+  },
+
+  async cancelInvoice(id: string): Promise<Invoice> {
+    if (isApiEnabled()) return api.cancelInvoice(id);
+    requireProductionApi();
+
+    const invoices = getLocal<Invoice[]>(INVOICES_KEY, []);
+    const idx = invoices.findIndex(i => i.id === id);
+    if (idx < 0) throw new ApiError('Invoice not found', 404);
+    const updated = [...invoices];
+    updated[idx] = { ...updated[idx], status: 'Cancelled' };
     setLocal(INVOICES_KEY, updated);
 
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        await sb.from('invoices').upsert(invoice);
-      } catch (e) {
-        console.warn('Supabase saveInvoice error', e);
-      }
-    }
+    const usage = getLocal<MonthlyCreditUsage[]>(USAGE_KEY, []).map(record =>
+      record.invoice_id === id
+        ? {
+            ...record,
+            invoice_id: undefined,
+            invoice_voucher_no: undefined,
+            billed: false,
+            updated_at: new Date().toISOString(),
+          }
+        : record
+    );
+    setLocal(USAGE_KEY, usage);
+    return updated[idx];
   },
 
-  async saveInvoicesBatch(newInvoices: Invoice[]): Promise<void> {
-    if (isApiEnabled()) {
-      await api.saveInvoicesBatch(newInvoices);
-      return;
-    }
+  async saveInvoicesBatch(newInvoices: Invoice[]): Promise<Invoice[]> {
+    if (isApiEnabled()) return api.saveInvoicesBatch(newInvoices);
+    requireProductionApi();
 
-    const current = await this.getInvoices();
     const map = new Map<string, Invoice>();
-    current.forEach(i => map.set(i.id, i));
+    getLocal<Invoice[]>(INVOICES_KEY, []).forEach(i => map.set(i.id, i));
     newInvoices.forEach(i => map.set(i.id, i));
-    const merged = Array.from(map.values());
-    setLocal(INVOICES_KEY, merged);
-
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        await sb.from('invoices').upsert(newInvoices);
-      } catch (e) {
-        console.warn('Supabase saveInvoicesBatch error', e);
-      }
-    }
+    setLocal(INVOICES_KEY, Array.from(map.values()));
+    return newInvoices;
   },
 
-  // Monthly Usage
+  // Monthly Usage (manual, unbilled records only; invoice-linked usage is synced by the DB)
   async getMonthlyUsage(month?: string, year?: number): Promise<MonthlyCreditUsage[]> {
     if (isApiEnabled()) return api.getMonthlyUsage(month, year);
+    requireProductionApi();
 
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        let query = sb.from('monthly_credit_usage').select('*');
-        if (month) query = query.eq('month', month);
-        if (year) query = query.eq('year', year);
-        const { data, error } = await query;
-        if (!error && data && data.length > 0) return data as MonthlyCreditUsage[];
-      } catch (e) {
-        console.warn('Supabase getMonthlyUsage error, falling back to local', e);
-      }
-    }
-    const all = getLocal<MonthlyCreditUsage[]>(USAGE_KEY, initialMonthlyUsage);
+    const all = getLocal<MonthlyCreditUsage[]>(USAGE_KEY, []);
     if (!month && !year) return all;
     return all.filter(u => (!month || u.month === month) && (!year || u.year === year));
   },
@@ -292,26 +182,14 @@ export const db = {
       await api.saveMonthlyUsageRecord(record);
       return;
     }
+    requireProductionApi();
 
-    const all = await this.getMonthlyUsage();
+    const all = getLocal<MonthlyCreditUsage[]>(USAGE_KEY, []);
     const idx = all.findIndex(u => u.id === record.id);
-    let updated: MonthlyCreditUsage[];
-    if (idx >= 0) {
-      updated = [...all];
-      updated[idx] = record;
-    } else {
-      updated = [record, ...all];
-    }
+    const updated = [...all];
+    if (idx >= 0) updated[idx] = record;
+    else updated.unshift(record);
     setLocal(USAGE_KEY, updated);
-
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        await sb.from('monthly_credit_usage').upsert(record);
-      } catch (e) {
-        console.warn('Supabase saveMonthlyUsageRecord error', e);
-      }
-    }
   },
 
   async saveMonthlyUsageBatch(records: MonthlyCreditUsage[]): Promise<void> {
@@ -319,21 +197,11 @@ export const db = {
       await api.saveMonthlyUsageBatch(records);
       return;
     }
+    requireProductionApi();
 
-    const all = await this.getMonthlyUsage();
     const map = new Map<string, MonthlyCreditUsage>();
-    all.forEach(u => map.set(u.id, u));
+    getLocal<MonthlyCreditUsage[]>(USAGE_KEY, []).forEach(u => map.set(u.id, u));
     records.forEach(u => map.set(u.id, u));
-    const merged = Array.from(map.values());
-    setLocal(USAGE_KEY, merged);
-
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        await sb.from('monthly_credit_usage').upsert(records);
-      } catch (e) {
-        console.warn('Supabase saveMonthlyUsageBatch error', e);
-      }
-    }
-  }
+    setLocal(USAGE_KEY, Array.from(map.values()));
+  },
 };

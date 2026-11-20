@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import { AlertCircle, Loader2, Lock, ShieldCheck } from 'lucide-react';
 import { getSupabase, getSupabaseCredentials } from '@/lib/supabase';
-import { signInWithPassword } from '@/lib/auth';
+import { getCurrentUser, signInWithPassword } from '@/lib/auth';
 
 type AuthStatus = 'loading' | 'disabled' | 'anonymous' | 'authenticated' | 'misconfigured';
 
@@ -31,14 +31,12 @@ export const AuthGate: React.FC<{ children: React.ReactNode }> = ({ children }) 
 
     let mounted = true;
 
-    supabase.auth
-      .getUser()
-      .then(({ data, error }) => {
-        if (mounted) setStatus(!error && data.user ? 'authenticated' : 'anonymous');
-      })
-      .catch(() => {
-        if (mounted) setStatus('anonymous');
-      });
+    const loadUser = async () => {
+      const user = await getCurrentUser();
+      if (mounted) setStatus(user ? 'authenticated' : 'anonymous');
+    };
+
+    loadUser();
 
     const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
       if (mounted) setStatus(session ? 'authenticated' : 'anonymous');
@@ -83,7 +81,9 @@ export const AuthGate: React.FC<{ children: React.ReactNode }> = ({ children }) 
           <AlertCircle className="w-10 h-10 text-red-600 mx-auto" />
           <h1 className="text-base font-bold text-slate-900">Supabase is not configured</h1>
           <p className="text-xs text-slate-600">
-            Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY for this deployment.
+            Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY (or the legacy
+            NEXT_PUBLIC_SUPABASE_ANON_KEY) for this deployment, then reload. If authentication is
+            intentionally disabled, set NEXT_PUBLIC_AUTH_ENABLED=false.
           </p>
         </div>
       </div>

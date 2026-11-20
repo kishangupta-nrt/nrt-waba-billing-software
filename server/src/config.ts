@@ -5,16 +5,25 @@ import { z } from 'zod';
 loadEnv({ path: '.env.local', quiet: true });
 loadEnv({ quiet: true });
 
-const booleanString = z.enum(['true', 'false']).transform((value) => value === 'true');
+const booleanString = z
+  .enum(['true', 'false'])
+  .transform((value) => value === 'true');
 
-const EnvSchema = z.object({
-  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
-  PORT: z.coerce.number().int().positive().default(8787),
-  SUPABASE_URL: z.string().url(),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
-  CORS_ALLOWED_ORIGINS: z.string().default('http://localhost:3000'),
-  AUTH_REQUIRED: booleanString.optional(),
-});
+const EnvSchema = z
+  .object({
+    NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+    PORT: z.coerce.number().int().positive().default(8787),
+    SUPABASE_URL: z.string().url(),
+    // Legacy service-role key name and the newer Supabase secret key name.
+    SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
+    SUPABASE_SECRET_KEY: z.string().min(1).optional(),
+    CORS_ALLOWED_ORIGINS: z.string().default('http://localhost:3000'),
+    AUTH_REQUIRED: booleanString.optional(),
+  })
+  .refine(
+    (value) => Boolean(value.SUPABASE_SERVICE_ROLE_KEY || value.SUPABASE_SECRET_KEY),
+    { message: 'SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SECRET_KEY is required', path: ['SUPABASE_SERVICE_ROLE_KEY'] }
+  );
 
 const parsed = EnvSchema.safeParse(process.env);
 
@@ -27,19 +36,38 @@ if (!parsed.success) {
 }
 
 const raw = parsed.data;
+const isProduction = raw.NODE_ENV === 'production';
+
+// Endpoint hygiene: never accept a plain-HTTP Supabase endpoint in production.
+if (isProduction && !raw.SUPABASE_URL.startsWith('https://')) {
+  console.error('[config] SUPABASE_URL must use HTTPS in production');
+  process.exit(1);
+}
+
 const corsOrigins = raw.CORS_ALLOWED_ORIGINS.split(',')
-  .map((origin) => origin.trim())
+  .map((origin) => origin.trim().replace(/\/+$/, ''))
   .filter(Boolean);
 
 export const env = {
   nodeEnv: raw.NODE_ENV,
-  isProduction: raw.NODE_ENV === 'production',
+  isProduction,
   port: raw.PORT,
-  supabaseUrl: raw.SUPABASE_URL,
-  supabaseServiceRoleKey: raw.SUPABASE_SERVICE_ROLE_KEY,
+  supabaseUrl: raw.SUPABASE_URL.replace(/\/+$/, ''),
+  supabaseServiceRoleKey: raw.SUPABASE_SERVICE_ROLE_KEY || raw.SUPABASE_SECRET_KEY || '',
   corsOrigins,
-  // Default to requiring auth in production, bypassable for local development.
-  authRequired: raw.AUTH_REQUIRED ?? raw.NODE_ENV === 'production',
-  appVersion: '1.1.0',
+  // Fail closed: production always requires a valid Supabase JWT.
+  authRequired: isProduction ? true : raw.AUTH_REQUIRED ?? false,
+  authTimeoutMs: 8000,
+  requestBodyLimit: 512 * 1024,
+  appVersion: '1.2.0',
   serviceName: 'waba-billing-api',
+  rateLimit: {
+    windowMs: 60_000,
+    readMax: 300,
+    writeMax: 60,
+  },
 };
+
+if (isProduction && raw.AUTH_REQUIRED === false) {
+  console.warn('[config] AUTH_REQUIRED=false is ignored in production; authentication is enforced.');
+}

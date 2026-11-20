@@ -1,9 +1,10 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { config } from './config';
 
 let supabaseClient: SupabaseClient | null = null;
 
 export function getSupabaseCredentials(): { url: string; key: string } | null {
-  if (process.env.NODE_ENV !== 'production' && typeof window !== 'undefined') {
+  if (config.isDevelopment && typeof window !== 'undefined') {
     const customUrl = localStorage.getItem('custom_supabase_url');
     const customKey = localStorage.getItem('custom_supabase_key');
     if (customUrl && customKey) {
@@ -11,11 +12,8 @@ export function getSupabaseCredentials(): { url: string; key: string } | null {
     }
   }
 
-  const envUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const envKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (envUrl && envKey && !envUrl.includes('placeholder')) {
-    return { url: envUrl, key: envKey };
+  if (config.hasSupabaseConfigured) {
+    return { url: config.supabaseUrl, key: config.supabaseAnonKey };
   }
 
   return null;
@@ -27,10 +25,18 @@ export function getSupabase(): SupabaseClient | null {
   const creds = getSupabaseCredentials();
   if (creds) {
     try {
-      supabaseClient = createClient(creds.url, creds.key);
+      supabaseClient = createClient(creds.url, creds.key, {
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+        },
+      });
       return supabaseClient;
-    } catch (e) {
-      console.warn('Failed to initialize Supabase client:', e);
+    } catch (error) {
+      if (config.isDevelopment) {
+        console.warn('Failed to initialize Supabase client');
+      }
       return null;
     }
   }

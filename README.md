@@ -1,182 +1,165 @@
-# WABA Billing System - WhatsApp Business API Invoice Engine
+# WABA Billing System
 
-A modern, high-precision web application built with **Next.js 14**, **Tailwind CSS**, and **Supabase** designed to generate proforma and tax invoices that **faithfully match the shared PDF format** (`DERMATOLOGY AND BEYOD.pdf`) for single or multiple clients in one go.
+A static Next.js frontend and a Hono API for generating WABA (WhatsApp Business API) proforma and tax invoices for single clients or batches, with monthly usage history, GST breakdowns, and PDF export.
 
----
+## Stack
 
-## ðŸŒŸ Key Features
+- Next.js 15.5 (App Router, static export to `out/`)
+- React 18.3, Tailwind CSS 3.4
+- Hono 4 API (`server/`)
+- Supabase (Postgres + Auth)
+- jsPDF + html2canvas for PDFs, JSZip for batch archives
 
-### 1. Exact 1:1 Shared PDF Format Replica
-- **Authentic Company Header & Logo**: NEWRISE TECHNOSYS PVT LTD, Bhopal, MP (GSTIN: `23AAECN8171A1ZT`, State Code: `23`, PAN: `AAECN8171A`).
-- **Complete Two-Column Header**:
-  - Left column: Company details & Buyer (Bill to) info (`DERMATOLOGY AND BEYOD`, State Code: `23`).
-  - Right column: Voucher No. (`NRT/PI/26-27/00242`), Dated (`2-Nov-26`), Buyer Ref, Other References (`Health Clinic`), Destination, Terms of Delivery.
-- **Service Lines & HSN/SAC**:
-  - Service: `WhatsApp Business API` with subline (e.g., `Utility Message TILL 31 OCT 2026`).
-  - HSN/SAC: `998314`.
-  - Quantity (`756.0000 NOS`), Rate (`0.3650`), Per (`NOS`), Amount (`275.9400`).
-- **Dual GST Tax Calculation**:
-  - **CGST (9%) + SGST (9%)**: For intra-state transactions (e.g. Madhya Pradesh, Code 23).
-  - **IGST (18%)**: For inter-state transactions (e.g. Maharashtra 27, Delhi 07, Gujarat 24, Karnataka 29).
-  - Automatic detection by buyer's state code with **manual toggle button**.
-- **Automated Round-Off & Words**:
-  - Calculates round-off adjustment (e.g., `+0.3908`) to produce clean round totals (`â‚¹ 326.0000`).
-  - Indian currency words converter: `INR Three Hundred Twenty Six Only`.
-- **Authentic Footer**:
-  - Company PAN & Declaration.
-  - Complete Bank Details (`ICICI Bank - 447`, A/c: `119305000447`, IFS: `ICIC0001192`, SWIFT: `ICICINBBXXX`).
-  - Signature block for *for NEWRISE TECHNOSYS PVT LTD (Authorised Signatory)*.
+## Features
 
----
+- Single invoice editor with live preview and A4 PDF download.
+- Batch billing from a CSV or editable table, with ZIP download and per-invoice print.
+- CGST/SGST or IGST calculations, per-line tax totals, round-off, and Indian currency words.
+- Monthly history with usage totals, tax breakdowns, search, account/status filters, JSON backup, and invoice reprint/edit.
+- Cancel a generated invoice without deleting it; linked monthly usage is released so the same account can be billed again.
+- Repeat an existing invoice or use "Same Client" to start a fresh invoice for the current account.
+- Client directory, company/bank settings, and validation for GSTIN, PAN, IFSC, PIN, and state codes.
+- Mobile-first layout; tax breakdowns remain visible on small screens and in print.
+- Voucher numbers are assigned by the database per Indian financial year; client-supplied numbers are ignored.
+- Usage rows are reconciled by database triggers (one linked row per invoice, month/year taken from `billing_month` when valid, otherwise derived from `invoice_date`).
 
-### 2. Multi-Client Batch Billing in One Go
-- **Generate Invoices for Multiple Clients in One Click**:
-  - Select all or subset of clients.
-  - Automatically issues sequential voucher numbers (`00242`, `00243`, `00244`...).
-  - Calculates taxes and totals per client based on state and credits used.
-- **Sample File CSV Template Download**:
-  - Click **Download Sample CSV** to get pre-formatted template (`waba_billing_sample_template.csv`).
-- **CSV / Batch File Upload**:
-  - Upload your client data spreadsheet.
-  - Real-time preview with inline editable rates, credits, and tax mode toggles.
-- **Batch Export**:
-  - **Download All as ZIP**: Compresses all generated PDF invoices into a single ZIP archive.
-  - **Print All**: Batch print through native browser vector print.
+## Security model
 
----
+- The browser never writes directly to Supabase in production. All reads/writes go through the Render API via `NEXT_PUBLIC_API_URL`.
+- Supabase RLS is enabled and read-only for authenticated users. The Render API uses the server-only secret/service-role key for writes.
+- The API owns IDs, timestamps, totals, tax amounts, billing month, and voucher numbers. Zod schemas validate and whitelist every payload.
+- Production fails closed: `AUTH_REQUIRED` is forced to true and the API requires a valid Supabase JWT.
+- CSV exports are sanitized against spreadsheet formula injection.
+- There is no LocalStorage fallback in production. It is only available in development when `NEXT_PUBLIC_API_URL` is empty.
 
-### 3. Customizable Charges & Credit Preferences
-- Edit billing rate per credit (default `0.3650`, customizable for utility, marketing, or client-specific rates).
-- Add multiple service line items (e.g. Utility Messages + Marketing Messages + Platform Fee).
-- Set custom default rates per client in the Client Directory.
+## Prerequisites
 
----
+- Node.js 20.9+ (tested with Node 24)
+- pnpm 9.12.0 (pinned in `package.json`)
 
-### 4. Monthly Bill History & Credit Usage
-- Filter records by Month (e.g. October, November) and Year (2025â€“2027).
-- Track total credits consumed, billed amount, pending clients, and tax collection.
-- Inline **Edit Charges** modal to modify client rates or credits on the fly.
-- Historical invoices archive with instant replica preview and reprint.
+## Setup
 
----
+### 1. Install dependencies
 
-### 5. Secured Supabase + Render Backend
-- **Supabase Auth**: The dashboard is protected by an email/password login gate (`NEXT_PUBLIC_AUTH_ENABLED`).
-- **Render Hono API**: All invoice/client/usage writes go through `server/` when `NEXT_PUBLIC_API_URL` is set. The API verifies Supabase JWTs when `AUTH_REQUIRED=true` and keeps the service-role key server-side.
-- **RLS**: `supabase/migrations/` replaces the legacy permissive policies with authenticated-only access.
-- **Offline Fallback**: For local development, leaving `NEXT_PUBLIC_API_URL` and the Supabase variables empty falls back to browser `LocalStorage`. Production deployments should always set the Render API URL.
-
----
-
-## ðŸš€ Getting Started
-
-### Prerequisites
-- Node.js 20.9+ (tested with v24.18.0)
-- `pnpm` 9+ (`packageManager` is pinned to pnpm 9.12.0)
-
-### 1. Install Dependencies
 ```bash
 pnpm install
-# or
-npm install
 ```
 
-### 2. Configure Environment
-Copy `.env.example` to `.env.local`:
-```bash
-cp .env.example .env.local
-```
+### 2. Configure environment
+
+Copy `.env.example` to `.env.local` and fill in the values.
+
 Public browser variables:
+
 ```env
 NEXT_PUBLIC_API_URL=http://localhost:8787
 NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your-publishable-key
 NEXT_PUBLIC_AUTH_ENABLED=true
 ```
-Server-only variables (used by `pnpm dev:server`; set the same names in Render):
+
+Legacy projects can use `NEXT_PUBLIC_SUPABASE_ANON_KEY` instead of the publishable key.
+
+Server-only variables (Render / `.env.local` for the API):
+
 ```env
 SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+SUPABASE_SECRET_KEY=your-secret-key
 CORS_ALLOWED_ORIGINS=http://localhost:3000
 AUTH_REQUIRED=true
 PORT=8787
 ```
-Never prefix the service-role key with `NEXT_PUBLIC_`; it would be embedded in the browser bundle.
 
-### 3. Set Up Supabase Database
-- **New project**: run `supabase/schema.sql` in the [Supabase SQL Editor](https://supabase.com/dashboard/project/_/sql).
-- **Existing project**: run every file in `supabase/migrations/` in order (`0001` â†’ `0003`).
-- In Supabase Dashboard â†’ Authentication â†’ Providers, enable Email/Password and **disable public sign-ups**. Create users from the dashboard.
+`SUPABASE_SERVICE_ROLE_KEY` is also supported in place of `SUPABASE_SECRET_KEY`. Never prefix either key with `NEXT_PUBLIC_`.
 
-### 4. Run Development Servers
+### 3. Set up the database
+
+- New project: run `supabase/schema.sql` in the Supabase SQL Editor.
+- Existing project: run every file in `supabase/migrations/` in order (`0001` through `0005`).
+- Enable Email/Password auth and disable public sign-ups. Create users from the Supabase dashboard.
+
+`public/schema.sql` is a byte-identical copy used by the Settings modal's "Copy schema" helper.
+
+### 4. Run locally
+
 ```bash
-pnpm dev:server   # Hono API on http://localhost:8787
-pnpm dev          # Next.js on http://localhost:3000
+pnpm dev:server   # API on http://localhost:8787
+pnpm dev          # frontend on http://localhost:3000
 ```
-Leave `NEXT_PUBLIC_API_URL` empty to run the offline LocalStorage fallback without the backend.
 
-### 5. Production Build
-The frontend is a static export (`out/`) and the backend is a Node bundle (`server/dist/`).
+Leave `NEXT_PUBLIC_API_URL` empty to use the development-only LocalStorage fallback.
+
+## Scripts
+
 ```bash
-pnpm build         # static export
-pnpm start         # preview out/ locally
-pnpm build:server  # bundle the Hono API
+pnpm dev           # Next.js dev server
+pnpm build         # static export to out/
+pnpm start         # serve out/ locally
+pnpm lint          # ESLint via next lint
+pnpm typecheck     # tsc --noEmit
+pnpm test          # vitest
+pnpm dev:server    # Hono API with watch
+pnpm build:server  # bundle API to server/dist/
+pnpm start:server  # run bundled API
 pnpm deploy:frontend
 ```
+
+## Construction setup
+
+Use this sequence to build and verify the application locally:
+
+1. Install deterministic dependencies with `pnpm install --frozen-lockfile`.
+2. Copy `.env.example` to `.env.local` and set the browser and server values.
+3. Construct the database:
+   - New project: run `supabase/schema.sql`.
+   - Existing project: run `supabase/migrations/0001` through `0005` in order.
+   - Migration `0005` adds safe invoice cancellation and usage release.
+4. Start the API with `pnpm dev:server`, then the frontend with `pnpm dev`.
+5. Run the full verification gate before deployment:
+
+   ```bash
+   pnpm typecheck
+   pnpm lint
+   pnpm test
+   pnpm build
+   pnpm build:server
+   pnpm audit --prod
+   ```
+
+6. Deploy the API first (`render.yaml`), then the static frontend. Set `NEXT_PUBLIC_API_URL` to the deployed API URL.
 
 ## Deployment
 
 ### Render (API)
-`render.yaml` defines the `waba-billing-api` web service. Set these secrets in the Render dashboard:
+
+`render.yaml` defines the `waba-billing-api` service. Set these secrets:
+
 - `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`)
 - `CORS_ALLOWED_ORIGINS` (comma-separated Cloudflare Pages URL + localhost)
 - `AUTH_REQUIRED=true`
 
-### Cloudflare Pages (Frontend)
+### Cloudflare Pages (frontend)
+
 - Build command: `pnpm install --frozen-lockfile && pnpm build`
-- Build output directory: `out`
-- Environment variables: `NEXT_PUBLIC_API_URL` (your Render URL), `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_AUTH_ENABLED=true`
-- `public/_headers` adds security/cache headers; `wrangler.jsonc` supports `wrangler pages deploy out`.
+- Output directory: `out`
+- Environment variables: `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `NEXT_PUBLIC_AUTH_ENABLED=true`
 
-No API endpoints are hardcoded: the browser always uses `NEXT_PUBLIC_API_URL`, and the API URL is never committed.
+`public/_headers` adds security headers (including CSP) and immutable caching for `/_next/static/*`.
 
----
+## Project layout
 
-## ðŸ“ Project Architecture
-
-```
-d:\wababillingsystem/
-â”œâ”€â”€ app/
-â”‚   â”œâ”€â”€ globals.css           # Tailwind base styles and print media rules
-â”‚   â”œâ”€â”€ layout.tsx            # HTML root & metadata
-â”‚   â””â”€â”€ page.tsx              # Main dashboard orchestrator
-â”œâ”€â”€ components/
-â”‚   â”œâ”€â”€ InvoiceTemplate.tsx   # Pixel-perfect replica of DERMATOLOGY AND BEYOD.pdf
-â”‚   â”œâ”€â”€ SingleInvoiceGenerator.tsx # Single invoice editor & live side-by-side preview
-â”‚   â”œâ”€â”€ BulkInvoiceGenerator.tsx   # Batch billing, CSV import/export & ZIP downloader
-â”‚   â”œâ”€â”€ MonthlyHistory.tsx    # Monthly credits usage & bill archive
-â”‚   â”œâ”€â”€ ClientManager.tsx     # Client master directory & rate preferences
-â”‚   â”œâ”€â”€ SettingsModal.tsx     # Company profile, bank info & Supabase keys
-â”‚   â””â”€â”€ Navbar.tsx            # Navigation header & Supabase connection badge
-â”œâ”€â”€ lib/
-â”‚   â”œâ”€â”€ db.ts                 # Unified DB layer (Supabase + LocalStorage fallback)
-â”‚   â”œâ”€â”€ mockData.ts           # Pre-loaded clients, initial invoices & usage
-â”‚   â”œâ”€â”€ numberToWords.ts      # Indian currency word converter (INR Words Only)
-â”‚   â”œâ”€â”€ pdfGenerator.ts       # Client-side PDF export (jsPDF & html2canvas)
-â”‚   â”œâ”€â”€ supabase.ts           # Supabase client wrapper
-â”‚   â”œâ”€â”€ taxUtils.ts           # Tax calculations (CGST/SGST vs IGST, round-offs)
-â”‚   â””â”€â”€ types.ts              # TypeScript schemas and models
-â”œâ”€â”€ server/
-â”‚   â”œâ”€â”€ src/                  # Hono API (auth, validation, CRUD routes)
-â”‚   â””â”€â”€ legacy-next-api/      # Previous Next.js API routes (not deployed)
-â”œâ”€â”€ public/
-â”‚   â”œâ”€â”€ _headers              # Cloudflare Pages security/cache headers
-â”‚   â”œâ”€â”€ logo.png              # Authentic Newrise Technosys extracted logo
-â”‚   â””â”€â”€ schema.sql            # Copy of the canonical schema for the UI helper
-â”œâ”€â”€ supabase/
-â”‚   â”œâ”€â”€ schema.sql            # Full PostgreSQL schema with authenticated RLS
-â”‚   â””â”€â”€ migrations/           # Incremental migrations for existing projects
-â”œâ”€â”€ render.yaml               # Render backend blueprint
-â””â”€â”€ wrangler.jsonc            # Cloudflare Pages deployment config
+```text
+app/                     Next.js App Router pages and styles
+components/              Invoice, batch, history, client, settings, nav, auth UI
+lib/                     Types, config, API client, Supabase client, tax/PDF/CSV utilities
+server/src/              Hono API (config, auth, rate limiting, routes, validation)
+server/dist/             Built API bundle (generated)
+supabase/schema.sql      Canonical schema (RLS read-only, triggers, indexes)
+supabase/migrations/     Incremental migrations 0001-0005
+public/schema.sql        Copy of the canonical schema for the UI helper
+public/_headers          Cloudflare Pages security and cache headers
+render.yaml              Render backend blueprint
+wrangler.jsonc           Cloudflare Pages config
+tests/                   Vitest unit tests
 ```

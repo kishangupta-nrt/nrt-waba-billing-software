@@ -2,9 +2,11 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { bodyLimit } from 'hono/body-limit';
+import { secureHeaders } from 'hono/secure-headers';
 import { serve } from '@hono/node-server';
 import { env } from './config';
 import { requireAuth, type AppEnv } from './auth';
+import { rateLimit } from './rateLimit';
 import { health } from './routes/health';
 import { settings } from './routes/settings';
 import { clients } from './routes/clients';
@@ -17,11 +19,13 @@ if (!env.isProduction) {
   app.use('*', logger());
 }
 
+app.use('*', secureHeaders());
+
 app.use(
   '*',
   cors({
     origin: (origin) => {
-      if (!origin) return env.corsOrigins[0] || undefined;
+      if (!origin) return undefined;
       if (env.corsOrigins.includes('*')) return origin;
       return env.corsOrigins.includes(origin) ? origin : undefined;
     },
@@ -31,23 +35,18 @@ app.use(
   })
 );
 
-app.get('/', (c) =>
-  c.json({
-    service: env.serviceName,
-    version: env.appVersion,
-    docs: ['/health', '/api/settings', '/api/clients', '/api/invoices', '/api/usage'],
-  })
-);
+app.get('/', (c) => c.json({ service: env.serviceName, status: 'ok' }));
 
 app.route('/health', health);
 
 // Every data route requires a Supabase access token when AUTH_REQUIRED is on.
 app.use('/api/*', requireAuth);
+app.use('/api/*', rateLimit);
 
 app.use(
   '/api/*',
   bodyLimit({
-    maxSize: 1024 * 1024,
+    maxSize: env.requestBodyLimit,
     onError: (c) => c.json({ success: false, error: 'Payload too large' }, 413),
   })
 );

@@ -1,10 +1,12 @@
 -- 0001_auth_rls.sql
--- Replaces the permissive "public" policies with authenticated-only access.
+-- Replaces the permissive "public" policies with authenticated read-only access.
 -- Apply this AFTER Supabase Auth users exist and the Render backend is live.
 --
--- Model: single-tenant (any authenticated user may access company data).
--- Public sign-ups should be disabled in Supabase Dashboard > Authentication.
--- The Render backend uses the service-role key and is not affected by RLS.
+-- Model: single-tenant (any authenticated user may read company data).
+-- All writes go through the Render API, which validates input and owns voucher
+-- numbering. Public sign-ups should be disabled in Supabase Dashboard >
+-- Authentication. The Render backend uses the service-role key and is not
+-- affected by RLS.
 
 begin;
 
@@ -31,13 +33,13 @@ drop policy if exists "Authenticated access to invoices" on invoices;
 drop policy if exists "Authenticated access to monthly_credit_usage" on monthly_credit_usage;
 
 create policy "Authenticated access to company_settings"
-  on company_settings for all to authenticated using (true) with check (true);
+  on company_settings for select to authenticated using (true);
 create policy "Authenticated access to clients"
-  on clients for all to authenticated using (true) with check (true);
+  on clients for select to authenticated using (true);
 create policy "Authenticated access to invoices"
-  on invoices for all to authenticated using (true) with check (true);
+  on invoices for select to authenticated using (true);
 create policy "Authenticated access to monthly_credit_usage"
-  on monthly_credit_usage for all to authenticated using (true) with check (true);
+  on monthly_credit_usage for select to authenticated using (true);
 
 create index if not exists idx_invoices_client_id on invoices (client_id);
 create index if not exists idx_usage_month_year on monthly_credit_usage (month, year);

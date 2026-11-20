@@ -20,13 +20,14 @@ async function databaseIsReachable(): Promise<boolean> {
 
 health.get('/', async (c) => {
   const database: 'ok' | 'unavailable' = (await databaseIsReachable()) ? 'ok' : 'unavailable';
+  const status = database === 'ok' ? 200 : 503;
 
-  return c.json({
-    status: database === 'ok' ? 'ok' : 'degraded',
-    service: env.serviceName,
-    version: env.appVersion,
-    timestamp: new Date().toISOString(),
-    database,
-    authRequired: env.authRequired,
-  });
+  return c.json(
+    {
+      status: database === 'ok' ? 'ok' : 'degraded',
+      database,
+      timestamp: new Date().toISOString(),
+    },
+    status
+  );
 });

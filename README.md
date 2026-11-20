@@ -136,16 +136,18 @@ Use this sequence to build and verify the application locally:
 
 - `SUPABASE_URL`
 - `SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`)
-- `CORS_ALLOWED_ORIGINS` (comma-separated Cloudflare Pages URL + localhost)
+- `CORS_ALLOWED_ORIGINS` (comma-separated Cloudflare Workers URL + localhost)
 - `AUTH_REQUIRED=true`
 
-### Cloudflare Pages (frontend)
+### Cloudflare Workers (frontend)
 
+- Worker name: `nrt-waba-billing-software`
 - Build command: `pnpm install --frozen-lockfile && pnpm build`
-- Output directory: `out`
-- Environment variables: `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `NEXT_PUBLIC_AUTH_ENABLED=true`
+- Deploy command: `pnpm exec wrangler deploy`
+- Asset directory: `out`
+- Environment variables: `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `NEXT_PUBLIC_AUTH_ENABLED=true`, `NODE_VERSION=20`
 
-`public/_headers` adds security headers (including CSP) and immutable caching for `/_next/static/*`.
+These variables are needed at build time because `NEXT_PUBLIC_*` values are compiled into the static export. `public/_headers` adds security headers (including CSP) and immutable caching for `/_next/static/*`.
 
 ## Project layout
 
@@ -158,8 +160,8 @@ server/dist/             Built API bundle (generated)
 supabase/schema.sql      Canonical schema (RLS read-only, triggers, indexes)
 supabase/migrations/     Incremental migrations 0001-0005
 public/schema.sql        Copy of the canonical schema for the UI helper
-public/_headers          Cloudflare Pages security and cache headers
+public/_headers          Cloudflare Workers static-asset security and cache headers
 render.yaml              Render backend blueprint
-wrangler.jsonc           Cloudflare Pages config
+wrangler.jsonc           Cloudflare Workers static-asset config
 tests/                   Vitest unit tests
 ```

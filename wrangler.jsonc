@@ -1,6 +1,8 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "waba-billing-frontend",
-  "pages_build_output_dir": "out",
-  "compatibility_date": "2026-11-19"
+  "name": "nrt-waba-billing-software",
+  "compatibility_date": "2026-11-19",
+  "assets": {
+    "directory": "./out"
+  }
 }

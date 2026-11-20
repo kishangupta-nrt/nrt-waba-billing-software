@@ -12,7 +12,7 @@
     "dev:server": "tsx watch server/src/index.ts",
     "build:server": "tsup server/src/index.ts --format cjs --platform node --target node20 --out-dir server/dist --clean",
     "start:server": "node server/dist/index.js",
-    "deploy:frontend": "wrangler pages deploy out --project-name waba-billing-frontend"
+    "deploy:frontend": "wrangler deploy"
   },
   "engines": {
     "node": ">=20.9.0"

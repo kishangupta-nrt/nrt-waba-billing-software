@@ -37,7 +37,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 }) => {
   const tabs: TabItem[] = [
     { id: 'single', label: 'Single Invoice', icon: FileText },
-    { id: 'bulk', label: 'Batch Billing', icon: Layers, badge: 'Batch' },
+    { id: 'bulk', label: 'Bill Multiple Clients', icon: Layers, badge: 'Bulk' },
     { id: 'history', label: 'Monthly Usage', icon: History },
     { id: 'clients', label: 'Clients', icon: Users },
   ];

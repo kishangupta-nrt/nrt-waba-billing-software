@@ -292,29 +292,6 @@ function BillingDashboard() {
         connectionDetail={connectionDetail}
       />
 
-      <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 border-b border-slate-700/60 text-white py-3 px-4 sm:px-6 lg:px-8 print:hidden">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
-          <div className="flex items-start sm:items-center gap-2 min-w-0">
-            <span className="bg-orange-500/20 text-orange-400 p-1 rounded-md border border-orange-500/30 shrink-0">
-              <Sparkles className="w-3.5 h-3.5" />
-            </span>
-            <span className="font-semibold text-slate-200 shrink-0">Shared PDF Template:</span>
-            <span className="text-slate-400 truncate">
-              NEWRISE TECHNOSYS PVT LTD • WhatsApp Business API • HSN 998314
-            </span>
-          </div>
-
-          <button
-            onClick={() => setActiveTab('bulk')}
-            className="text-orange-400 hover:text-orange-300 font-semibold flex items-center gap-1 transition-colors shrink-0"
-          >
-            <Layers className="w-3.5 h-3.5" />
-            <span>Bill Multiple Clients</span>
-            <ArrowRight className="w-3 h-3" />
-          </button>
-        </div>
-      </div>
-
       {loadError && (
         <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-4 print:hidden">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 p-3 text-red-800">

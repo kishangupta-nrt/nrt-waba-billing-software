@@ -274,13 +274,21 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
           setError('The CSV file has no data rows.');
           return;
         }
-        if (dataRows.length > MAX_BATCH) {
-          setError(`CSV contains ${dataRows.length} rows. The maximum for one batch is ${MAX_BATCH}.`);
-          return;
-        }
 
-        const parsedRows = dataRows.map((row, index): BatchClientRow => {
-          const rawName = row['Client Name'] || row['Client'] || row['client_name'] || '';
+        // Group rows by client name to support multi-line invoices per client!
+        const clientGroups = new Map<string, {
+          name: string;
+          stateName: string;
+          stateCode: string;
+          gstin: string;
+          category: string;
+          items: Array<{ description: string; credits: number; rate: number }>;
+        }>();
+
+        for (const row of dataRows) {
+          const rawName = (row['Client Name'] || row['Client'] || row['client_name'] || '').trim();
+          if (!rawName) continue;
+
           const rawStateName = (row['State Name'] || row['State'] || '').trim();
           const rawStateCode = (row['State Code'] || row['state_code'] || '').trim().padStart(2, '0');
           const matchedState = INDIAN_STATES.find(
@@ -292,33 +300,73 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
           const stateName = matchedState?.name || rawStateName || 'Madhya Pradesh';
           const creditsRaw = row['Credits Quantity'] || row['Credits'] || row['Quantity'] || '0';
           const rateRaw = row['Rate'] || row['rate'] || String(companySettings.default_rate ?? 0.365);
-          const credits = Number(creditsRaw);
-          const rate = Number(rateRaw);
+          const credits = Number(creditsRaw) || 0;
+          const rate = Number(rateRaw) || Number(companySettings.default_rate ?? 0.365);
           const gstin = (row['GSTIN'] || '').trim().toUpperCase();
-          const gstinCheck = validateGstin(gstin, stateCode);
+          const category = (row['Reference Category'] || row['Category'] || 'General').trim();
+          const description = (row['Message Description'] || row['Description'] || billingPeriodDesc).trim();
+
+          const key = rawName.toLowerCase();
+          if (!clientGroups.has(key)) {
+            clientGroups.set(key, {
+              name: rawName,
+              stateName,
+              stateCode,
+              gstin,
+              category,
+              items: [{ description, credits, rate }],
+            });
+          } else {
+            const group = clientGroups.get(key)!;
+            group.items.push({ description, credits, rate });
+            if (gstin && !group.gstin) group.gstin = gstin;
+            if (category !== 'General' && group.category === 'General') group.category = category;
+          }
+        }
+
+        const groupedEntries = Array.from(clientGroups.values());
+        if (groupedEntries.length > MAX_BATCH) {
+          setError(`CSV contains ${groupedEntries.length} unique clients. The maximum for one batch is ${MAX_BATCH}.`);
+          return;
+        }
+
+        const parsedRows = groupedEntries.map((group, index): BatchClientRow => {
+          const totalCredits = group.items.reduce((acc, it) => acc + it.credits, 0);
+          const avgRate = group.items.length > 0 ? group.items[0].rate : Number(companySettings.default_rate ?? 0.365);
+          const gstinCheck = validateGstin(group.gstin, group.stateCode);
 
           let rowError: string | undefined;
-          if (!rawName.trim()) rowError = 'Client name is missing.';
-          else if (!isValidStateCode(stateCode)) rowError = `Invalid state code "${stateCode}".`;
-          else if (!Number.isFinite(credits) || credits < 0) rowError = 'Credits must be a non-negative number.';
-          else if (!Number.isFinite(rate) || rate < 0) rowError = 'Rate must be a non-negative number.';
+          if (!isValidStateCode(group.stateCode)) rowError = `Invalid state code "${group.stateCode}".`;
+          else if (totalCredits <= 0) rowError = 'Total credits must be greater than zero.';
           else if (!gstinCheck.valid) rowError = gstinCheck.error;
+
+          // Check if client exists in client directory
+          const matchedClient = clients.find(
+            c => c.name.toLowerCase() === group.name.toLowerCase()
+          );
 
           return {
             selected: true,
-            clientName: rawName.trim() || `Row ${index + 1}`,
-            stateName,
-            stateCode,
-            gstin,
-            category: (row['Reference Category'] || row['Category'] || 'General').trim(),
-            messageType: row['Message Description'] || billingPeriodDesc,
-            credits: Number.isFinite(credits) ? credits : 0,
-            rate: Number.isFinite(rate) ? rate : Number(companySettings.default_rate ?? 0.365),
-            taxMode: taxModeFor(stateCode, companySettings.state_code),
+            clientId: matchedClient?.id,
+            clientName: group.name,
+            stateName: group.stateName,
+            stateCode: group.stateCode,
+            gstin: group.gstin,
+            category: group.category,
+            messageType: group.items.length === 1 ? group.items[0].description : `${group.items.length} services itemized`,
+            credits: totalCredits,
+            rate: avgRate,
+            taxMode: taxModeFor(group.stateCode, companySettings.state_code),
             billingMonth: monthValueToLabel(billingMonth),
             dueOn: formattedInvoiceDate,
             status: rowError ? 'error' : 'pending',
             errorMsg: rowError,
+            items: group.items.map((it, itIdx) => ({
+              id: `csv_it_${index}_${itIdx}_${Date.now()}`,
+              description: it.description,
+              credits: it.credits,
+              rate: it.rate,
+            })),
           };
         });
 
@@ -393,19 +441,38 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
 
       selectedRows.forEach(({ row }, batchIndex) => {
         const voucherNo = uniqueVouchers[batchIndex];
-        const item = {
-          id: `item_bulk_${batchIndex}_${Date.now()}`,
-          sl_no: 1,
-          service_title: 'WhatsApp Business API',
-          service_description: row.messageType || billingPeriodDesc,
-          hsn_sac: companySettings.default_hsn || '998314',
-          due_on: formattedInvoiceDate,
-          quantity: row.credits,
-          rate: row.rate,
-          per: 'NOS',
-          amount: Number((row.credits * row.rate).toFixed(4)),
-        };
-        const totals = calculateInvoiceTotals([item], row.taxMode);
+        const hsn = companySettings.default_hsn || '998314';
+
+        // Support multiple line items per client if provided in batch
+        const items = (row.items && row.items.length > 0)
+          ? row.items.map((it, itemIdx) => ({
+              id: `item_bulk_${batchIndex}_${itemIdx}_${Date.now()}`,
+              sl_no: itemIdx + 1,
+              service_title: 'WhatsApp Business API',
+              service_description: it.description || row.messageType || billingPeriodDesc,
+              hsn_sac: hsn,
+              due_on: formattedInvoiceDate,
+              quantity: it.credits,
+              rate: it.rate,
+              per: 'NOS',
+              amount: Number((it.credits * it.rate).toFixed(4)),
+            }))
+          : [
+              {
+                id: `item_bulk_${batchIndex}_${Date.now()}`,
+                sl_no: 1,
+                service_title: 'WhatsApp Business API',
+                service_description: row.messageType || billingPeriodDesc,
+                hsn_sac: hsn,
+                due_on: formattedInvoiceDate,
+                quantity: row.credits,
+                rate: row.rate,
+                per: 'NOS',
+                amount: Number((row.credits * row.rate).toFixed(4)),
+              },
+            ];
+
+        const totals = calculateInvoiceTotals(items, row.taxMode);
 
         generated.push({
           id: `inv_bulk_${Date.now()}_${batchIndex}`,
@@ -422,7 +489,7 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
           buyer_state_code: row.stateCode,
           buyer_gstin: row.gstin.trim().toUpperCase(),
           tax_mode: row.taxMode,
-          items: [item],
+          items,
           subtotal: totals.subtotal,
           cgst_rate: totals.cgstRate,
           cgst_amount: totals.cgstAmount,
@@ -738,19 +805,34 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
                 </tr>
               ) : (
                 rows.map((row, index) => {
-                  const item = {
-                    id: `row_${index}`,
-                    sl_no: 1,
-                    service_title: 'WhatsApp Business API',
-                    service_description: row.messageType,
-                    hsn_sac: companySettings.default_hsn || '998314',
-                    due_on: formattedInvoiceDate,
-                    quantity: row.credits,
-                    rate: row.rate,
-                    per: 'NOS',
-                    amount: Number((row.credits * row.rate).toFixed(4)),
-                  };
-                  const calc = calculateInvoiceTotals([item], row.taxMode);
+                  const itemsToCalc = (row.items && row.items.length > 0)
+                    ? row.items.map((it, itIdx) => ({
+                        id: `row_${index}_${itIdx}`,
+                        sl_no: itIdx + 1,
+                        service_title: 'WhatsApp Business API',
+                        service_description: it.description,
+                        hsn_sac: companySettings.default_hsn || '998314',
+                        due_on: formattedInvoiceDate,
+                        quantity: it.credits,
+                        rate: it.rate,
+                        per: 'NOS',
+                        amount: Number((it.credits * it.rate).toFixed(4)),
+                      }))
+                    : [
+                        {
+                          id: `row_${index}`,
+                          sl_no: 1,
+                          service_title: 'WhatsApp Business API',
+                          service_description: row.messageType,
+                          hsn_sac: companySettings.default_hsn || '998314',
+                          due_on: formattedInvoiceDate,
+                          quantity: row.credits,
+                          rate: row.rate,
+                          per: 'NOS',
+                          amount: Number((row.credits * row.rate).toFixed(4)),
+                        },
+                      ];
+                  const calc = calculateInvoiceTotals(itemsToCalc, row.taxMode);
                   const rowError = row.errorMsg || rowValidationError(row);
 
                   return (
@@ -786,6 +868,17 @@ export const BulkInvoiceGenerator: React.FC<BulkInvoiceGeneratorProps> = ({
                             <span className="font-mono text-slate-600 break-all">GST: {row.gstin}</span>
                           )}
                         </div>
+                        {row.items && row.items.length > 1 && (
+                          <div className="mt-1.5 space-y-1 bg-slate-50 border border-slate-200 rounded p-1.5 text-[10.5px]">
+                            <span className="font-semibold text-slate-700 block">Itemized lines ({row.items.length}):</span>
+                            {row.items.map((it, itIdx) => (
+                              <div key={it.id || itIdx} className="flex justify-between text-slate-600 font-mono">
+                                <span className="truncate max-w-[130px]">{it.description}:</span>
+                                <span>{it.credits} @ ₹{it.rate}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                         <div className="mt-1">
                           <span className="text-[9.5px] font-mono font-bold text-orange-700 bg-orange-100/70 border border-orange-200/90 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>

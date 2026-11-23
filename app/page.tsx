@@ -170,28 +170,48 @@ function BillingDashboard() {
       monthIndex >= 0
         ? `${usage.year}-${String(monthIndex + 1).padStart(2, '0')}`
         : `${usage.year}-01`;
-    const description = buildBillingPeriodDescription(monthValue);
+    const periodLabel = buildBillingPeriodDescription(monthValue);
     const rate = Number(usage.rate_applied) || companySettings.default_rate || 0.365;
-    const quantity = Number(usage.total_credits) || 0;
-    const itemAmount = Number((quantity * rate).toFixed(4));
+    const hsn = companySettings.default_hsn || '998314';
+    const dueFormatted = formatDateForDisplay(today);
 
-    const totals = calculateInvoiceTotals(
-      [
-        {
-          id: `item_${Date.now()}`,
-          sl_no: 1,
-          service_title: 'WhatsApp Business API',
-          service_description: description,
-          hsn_sac: companySettings.default_hsn || '998314',
-          due_on: formatDateForDisplay(today),
-          quantity,
-          rate,
+    // Multi-category breakdown: generate itemized rows if separate categories exist
+    const categories = [
+      { name: 'Utility Messages', qty: Number(usage.utility_credits || 0) },
+      { name: 'Marketing Messages', qty: Number(usage.marketing_credits || 0) },
+      { name: 'Service Messages', qty: Number(usage.service_credits || 0) },
+      { name: 'Authentication Messages', qty: Number(usage.auth_credits || 0) },
+    ].filter(cat => cat.qty > 0);
+
+    const items = categories.length > 0
+      ? categories.map((cat, idx) => ({
+          id: `item_${Date.now()}_${idx}`,
+          sl_no: idx + 1,
+          service_title: `WhatsApp Business API - ${cat.name}`,
+          service_description: periodLabel,
+          hsn_sac: hsn,
+          due_on: dueFormatted,
+          quantity: cat.qty,
+          rate: rate,
           per: 'NOS',
-          amount: itemAmount,
-        },
-      ],
-      usage.tax_mode
-    );
+          amount: Number((cat.qty * rate).toFixed(4)),
+        }))
+      : [
+          {
+            id: `item_${Date.now()}`,
+            sl_no: 1,
+            service_title: 'WhatsApp Business API',
+            service_description: periodLabel,
+            hsn_sac: hsn,
+            due_on: dueFormatted,
+            quantity: Number(usage.total_credits) || 0,
+            rate: rate,
+            per: 'NOS',
+            amount: Number(((Number(usage.total_credits) || 0) * rate).toFixed(4)),
+          },
+        ];
+
+    const totals = calculateInvoiceTotals(items, usage.tax_mode);
 
     const uniqueVoucherNo = generateNextUniquePiNumber(
       invoices,
@@ -205,7 +225,7 @@ function BillingDashboard() {
       voucher_no: uniqueVoucherNo,
       invoice_type: 'Proforma Invoice',
       invoice_date: today,
-      formatted_date: formatDateForDisplay(today),
+      formatted_date: dueFormatted,
       due_date: today,
       buyer_name: usage.client_name,
       buyer_state_name: client?.state_name || 'Madhya Pradesh',
@@ -215,20 +235,7 @@ function BillingDashboard() {
       other_references: client?.reference_category || 'Health Clinic',
       tax_mode: usage.tax_mode,
       client_id: client?.id,
-      items: [
-        {
-          id: `item_${Date.now()}`,
-          sl_no: 1,
-          service_title: 'WhatsApp Business API',
-          service_description: description,
-          hsn_sac: companySettings.default_hsn || '998314',
-          due_on: formatDateForDisplay(today),
-          quantity,
-          rate,
-          per: 'NOS',
-          amount: itemAmount,
-        },
-      ],
+      items,
       subtotal: totals.subtotal,
       cgst_rate: totals.cgstRate,
       cgst_amount: totals.cgstAmount,

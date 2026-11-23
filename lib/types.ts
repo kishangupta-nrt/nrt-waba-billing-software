@@ -118,6 +118,13 @@ export interface MonthlyCreditUsage {
   updated_at?: string;
 }
 
+export interface BatchLineItem {
+  id: string;
+  description: string;
+  credits: number;
+  rate: number;
+}
+
 export interface BatchClientRow {
   selected: boolean;
   clientId?: string;
@@ -126,7 +133,7 @@ export interface BatchClientRow {
   stateCode: string;
   gstin: string;
   category: string;
-  messageType: string; // e.g. "Utility Message"
+  messageType: string; // fallback / common description
   credits: number;
   rate: number;
   taxMode: TaxMode;
@@ -135,4 +142,5 @@ export interface BatchClientRow {
   voucherNo?: string;
   status?: 'pending' | 'success' | 'error';
   errorMsg?: string;
+  items?: BatchLineItem[];
 }

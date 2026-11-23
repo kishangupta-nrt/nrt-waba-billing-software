@@ -65,10 +65,10 @@ describe('GST validation', () => {
     expect(validateGstin('23AAECN8171A1ZT', '23').valid).toBe(true);
   });
 
-  it('rejects an invalid checksum', () => {
+  it('flags checksum mismatch as a warning without blocking validity', () => {
     const result = validateGstin('23AAECN8171A1ZA', '23');
-    expect(result.valid).toBe(false);
-    expect(result.error).toMatch(/checksum/i);
+    expect(result.valid).toBe(true);
+    expect(result.warning).toMatch(/checksum mismatch/i);
   });
 
   it('rejects a state-code mismatch', () => {

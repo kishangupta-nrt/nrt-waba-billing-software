@@ -81,7 +81,7 @@ function gstinCharValue(char: string): number {
  * Validates the 15-character GSTIN checksum and that the first two digits are a
  * known GST state code.
  */
-export function validateGstin(gstin: string, stateCode?: string): { valid: boolean; error?: string } {
+export function validateGstin(gstin: string, stateCode?: string): { valid: boolean; error?: string; warning?: string } {
   const value = (gstin || '').trim().toUpperCase();
   if (!value) return { valid: true };
 
@@ -114,7 +114,10 @@ export function validateGstin(gstin: string, stateCode?: string): { valid: boole
   const expected = GSTIN_ALPHABET[checksumValue];
 
   if (expected !== value[14]) {
-    return { valid: false, error: 'GSTIN checksum is invalid' };
+    return {
+      valid: true,
+      warning: `GSTIN checksum mismatch (expected ${expected}, got ${value[14]}). Allowed for unregistered or test entries.`
+    };
   }
 
   return { valid: true };

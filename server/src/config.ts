@@ -58,7 +58,9 @@ export const env = {
   // Fail closed: production always requires a valid Supabase JWT.
   authRequired: isProduction ? true : raw.AUTH_REQUIRED ?? false,
   authTimeoutMs: 8000,
-  requestBodyLimit: 512 * 1024,
+  // Base64 payment proofs are sent inline with the JSON payload. A 4 MB image
+  // expands to roughly 5.3 MB, so leave headroom for the rest of the invoice.
+  requestBodyLimit: 8 * 1024 * 1024,
   appVersion: '1.2.0',
   serviceName: 'waba-billing-api',
   rateLimit: {

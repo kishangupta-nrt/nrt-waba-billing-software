@@ -18,7 +18,13 @@ import {
 import { numberToIndianWords } from '../lib/numberToWords';
 import { sanitizeCsvRecords, sanitizeCsvValue } from '../lib/csvUtils';
 import { normalizeInvoice } from '../server/src/normalize';
-import type { InvoiceInput } from '../server/src/schemas';
+import {
+  BulkCancelInvoicesSchema,
+  CancelInvoiceSchema,
+  DeleteRecordSchema,
+  PayInvoiceSchema,
+  type InvoiceInput,
+} from '../server/src/schemas';
 
 const lineItem = (quantity: number, rate: number): InvoiceItem => ({
   id: 'item_1',
@@ -196,5 +202,42 @@ describe('server invoice normalization', () => {
 
     const row = normalizeInvoice(input, 'invoice_2');
     expect(row.billing_month).toBe('October 2026');
+  });
+});
+
+describe('reason-bearing action schemas', () => {
+  it('requires a non-empty cancellation reason', () => {
+    expect(CancelInvoiceSchema.safeParse({ reason: '   ' }).success).toBe(false);
+    expect(CancelInvoiceSchema.safeParse({ reason: 'Wrong credit rate' }).success).toBe(true);
+  });
+
+  it('accepts bulk cancellation with ids and a shared reason', () => {
+    const parsed = BulkCancelInvoicesSchema.safeParse({
+      ids: ['inv_1', 'inv_2'],
+      reason: 'Duplicate PIs generated in bulk',
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('rejects bulk cancellation without ids or reason', () => {
+    expect(BulkCancelInvoicesSchema.safeParse({ ids: [], reason: 'x' }).success).toBe(false);
+    expect(BulkCancelInvoicesSchema.safeParse({ ids: ['inv_1'] }).success).toBe(false);
+  });
+
+  it('treats payment proof as optional and strips unknown fields', () => {
+    const parsed = PayInvoiceSchema.safeParse({
+      payment_notes: 'NEFT UTR 12345',
+      tampered: 'status: Cancelled',
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.payment_proof_url).toBe('');
+      expect('tampered' in parsed.data).toBe(false);
+    }
+  });
+
+  it('requires an explicit reason for deletions', () => {
+    expect(DeleteRecordSchema.safeParse({ reason: '' }).success).toBe(false);
+    expect(DeleteRecordSchema.safeParse({ reason: 'Generated with error' }).success).toBe(true);
   });
 });

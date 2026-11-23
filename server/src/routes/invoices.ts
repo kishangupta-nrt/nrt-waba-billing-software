@@ -1,8 +1,17 @@
 import { Hono } from 'hono';
 import { supabaseAdmin } from '../supabase';
-import { InvoiceSchema, taxModeMatchesState, type InvoiceInput } from '../schemas';
+import {
+  BulkCancelInvoicesSchema,
+  CancelInvoiceSchema,
+  DeleteRecordSchema,
+  InvoiceSchema,
+  PayInvoiceSchema,
+  taxModeMatchesState,
+  type InvoiceInput,
+} from '../schemas';
 import { normalizeInvoice } from '../normalize';
 import { fail } from '../errors';
+import { logAudit } from '../audit';
 import type { AppEnv } from '../auth';
 import { getIndianFinancialYear } from '../../../lib/piNumberUtils';
 
@@ -151,8 +160,9 @@ invoices.put('/:id', async (c) => {
 
   const updateRow: Record<string, unknown> = {
     ...normalized,
-    // Preserve audit fields; status can only change when explicitly supplied.
-    status: input.status ?? existing.status ?? 'Sent',
+    // Status is owned by the dedicated cancel/pay endpoints so a reason and
+    // proof are always recorded. Editing invoice content must not change it.
+    status: existing.status ?? 'Sent',
     created_at: existing.created_at ?? new Date().toISOString(),
   };
 
@@ -170,16 +180,174 @@ invoices.put('/:id', async (c) => {
   return c.json({ success: true, data });
 });
 
+invoices.post('/cancel', async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ success: false, error: 'Invalid JSON body' }, 400);
+  }
+
+  const parsed = BulkCancelInvoicesSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json(
+      { success: false, error: 'Invalid bulk cancellation request', issues: parsed.error.issues },
+      400
+    );
+  }
+
+  const { ids, reason } = parsed.data;
+  const uniqueIds = Array.from(new Set(ids));
+  const { data: existing, error: fetchError } = await supabaseAdmin
+    .from('invoices')
+    .select('id, status')
+    .in('id', uniqueIds);
+
+  if (fetchError) return fail(c, fetchError);
+
+  const toCancel = (existing ?? [])
+    .filter((row) => row.status !== 'Cancelled')
+    .map((row) => row.id);
+
+  if (toCancel.length > 0) {
+    const { error } = await supabaseAdmin
+      .from('invoices')
+      .update({ status: 'Cancelled', cancellation_reason: reason })
+      .in('id', toCancel);
+    if (error) return fail(c, error);
+    await Promise.all(
+      toCancel.map((id) => logAudit('invoice_cancelled', 'invoice', id, reason))
+    );
+  }
+
+  return c.json({
+    success: true,
+    data: { cancelled: toCancel, requested: uniqueIds.length },
+  });
+});
+
+invoices.post('/:id/pay', async (c) => {
+  const id = c.req.param('id');
+  if (!id) return c.json({ success: false, error: 'Invoice id is required' }, 400);
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ success: false, error: 'Invalid JSON body' }, 400);
+  }
+
+  const parsed = PayInvoiceSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json(
+      { success: false, error: 'Invalid payment details', issues: parsed.error.issues },
+      400
+    );
+  }
+
+  const { data: existing, error: fetchError } = await supabaseAdmin
+    .from('invoices')
+    .select('id, status')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (fetchError) return fail(c, fetchError);
+  if (!existing) return c.json({ success: false, error: 'Invoice not found' }, 404);
+  if (existing.status === 'Cancelled') {
+    return c.json({ success: false, error: 'A cancelled invoice cannot be marked as paid' }, 409);
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('invoices')
+    .update({
+      status: 'Paid',
+      payment_proof_url: parsed.data.payment_proof_url || null,
+      payment_notes: parsed.data.payment_notes || null,
+    })
+    .eq('id', id)
+    .neq('status', 'Cancelled') // Atomic guard: a concurrent cancel must win.
+    .select()
+    .maybeSingle();
+
+  if (error) return fail(c, error);
+  if (!data) {
+    return c.json({ success: false, error: 'A cancelled invoice cannot be marked as paid' }, 409);
+  }
+  await logAudit('invoice_paid', 'invoice', id, parsed.data.payment_notes || null, {
+    proof_attached: Boolean(parsed.data.payment_proof_url),
+  });
+  return c.json({ success: true, data });
+});
+
+invoices.post('/:id/delete', async (c) => {
+  const id = c.req.param('id');
+  if (!id) return c.json({ success: false, error: 'Invoice id is required' }, 400);
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ success: false, error: 'Invalid JSON body' }, 400);
+  }
+
+  const parsed = DeleteRecordSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json(
+      { success: false, error: 'A deletion reason is required', issues: parsed.error.issues },
+      400
+    );
+  }
+
+  const { data: existing, error: fetchError } = await supabaseAdmin
+    .from('invoices')
+    .select('id, voucher_no')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (fetchError) return fail(c, fetchError);
+  if (!existing) return c.json({ success: false, error: 'Invoice not found' }, 404);
+
+  // Release any monthly usage linked to this invoice.
+  await supabaseAdmin
+    .from('monthly_credit_usage')
+    .update({
+      billed: false,
+      status: 'pending',
+      status_reason: null,
+      payment_proof_url: null,
+      invoice_id: null,
+      invoice_voucher_no: null,
+    })
+    .eq('invoice_id', id);
+
+  const { error } = await supabaseAdmin.from('invoices').delete().eq('id', id);
+  if (error) return fail(c, error);
+
+  await logAudit('invoice_deleted', 'invoice', id, parsed.data.reason, {
+    voucher_no: existing.voucher_no,
+  });
+  return c.json({ success: true, id });
+});
+
 invoices.post('/:id/cancel', async (c) => {
   const id = c.req.param('id');
   if (!id) return c.json({ success: false, error: 'Invoice id is required' }, 400);
 
-  let body: { reason?: string } = {};
+  let body: unknown;
   try {
     body = await c.req.json();
   } catch {
-    // Body is optional
+    return c.json({ success: false, error: 'A cancellation reason is required' }, 400);
   }
+
+  const parsed = CancelInvoiceSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json(
+      { success: false, error: 'A cancellation reason is required', issues: parsed.error.issues },
+      400
+    );
+  }
+  const reason = parsed.data.reason;
 
   const { data: existing, error: fetchError } = await supabaseAdmin
     .from('invoices')
@@ -193,29 +361,16 @@ invoices.post('/:id/cancel', async (c) => {
 
   const { data, error } = await supabaseAdmin
     .from('invoices')
-    .update({
-      status: 'Cancelled',
-      cancellation_reason: body.reason || 'Cancelled by user',
-    })
+    .update({ status: 'Cancelled', cancellation_reason: reason })
     .eq('id', id)
     .select()
     .maybeSingle();
 
   if (error) return fail(c, error);
+  await logAudit('invoice_cancelled', 'invoice', id, reason);
   return c.json({ success: true, data });
 });
 
-invoices.delete('/:id', async (c) => {
-  const id = c.req.param('id');
-  if (!id) return c.json({ success: false, error: 'Invoice id is required' }, 400);
-
-  // Release any monthly usage linked to this invoice
-  await supabaseAdmin
-    .from('monthly_credit_usage')
-    .update({ billed: false, invoice_id: null, invoice_voucher_no: null })
-    .eq('invoice_id', id);
-
-  const { error } = await supabaseAdmin.from('invoices').delete().eq('id', id);
-  if (error) return fail(c, error);
-  return c.json({ success: true, id });
-});
+// Deletion is intentionally only available through POST /:id/delete, which
+// requires a reason and writes an audit entry. A legacy DELETE route would
+// bypass both controls, so it is deliberately not registered.

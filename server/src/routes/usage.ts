@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import { supabaseAdmin } from '../supabase';
-import { MonthlyUsageSchema, type MonthlyUsageInput } from '../schemas';
+import { DeleteRecordSchema, MonthlyUsageSchema, type MonthlyUsageInput } from '../schemas';
 import { fail } from '../errors';
+import { logAudit } from '../audit';
 import type { AppEnv } from '../auth';
 
 export const usage = new Hono<AppEnv>();
@@ -70,15 +71,32 @@ usage.post('/', async (c) => {
     parsedRows.push(parsed.data);
   }
 
+  const needsReason = parsedRows.some(
+    (row) =>
+      (row.status === 'refused_to_pay' || row.status === 'cancelled') &&
+      !row.status_reason
+  );
+  if (needsReason) {
+    return c.json(
+      {
+        success: false,
+        error: 'A reason is required for refused-to-pay or cancelled credit usage records',
+      },
+      400
+    );
+  }
+
   const requestedIds = parsedRows.map((row) => row.id).filter((id): id is string => Boolean(id));
+  const existingById = new Map<string, { id: string; invoice_id: string | null; billed: boolean }>();
   if (requestedIds.length > 0) {
     const { data: linked, error: linkedError } = await supabaseAdmin
       .from('monthly_credit_usage')
-      .select('id, invoice_id')
+      .select('id, invoice_id, billed')
       .in('id', requestedIds);
 
     if (linkedError) return fail(c, linkedError);
 
+    (linked ?? []).forEach((row) => existingById.set(row.id, row));
     const linkedIds = new Set(
       (linked ?? []).filter((row) => row.invoice_id).map((row) => row.id)
     );
@@ -117,7 +135,9 @@ usage.post('/', async (c) => {
       rate_applied: Number(input.rate_applied || 0.365),
       billed_amount: calculateBilledAmount(totalCredits, Number(input.rate_applied || 0.365), input.tax_mode),
       tax_mode: input.tax_mode,
-      billed: input.status === 'billed' || false,
+      // `billed` describes an existing invoice link and is server-owned; a
+      // status change (paid/refused/cancelled) must not flip it back.
+      billed: input.id ? Boolean(existingById.get(input.id)?.billed) : false,
       status: input.status || 'pending',
       status_reason: input.status_reason || null,
       payment_proof_url: input.payment_proof_url || null,
@@ -134,14 +154,62 @@ usage.post('/', async (c) => {
     .select();
 
   if (error) return fail(c, error);
+
+  await Promise.all(
+    rows
+      .filter((row) => ['paid', 'refused_to_pay', 'cancelled'].includes(row.status))
+      .map((row) =>
+        logAudit('usage_status_changed', 'usage', row.id, row.status_reason || null, {
+          status: row.status,
+        })
+      )
+  );
+
   return c.json({ success: true, data: isBatch ? data : data?.[0], count: rows.length });
 });
 
-usage.delete('/:id', async (c) => {
+usage.post('/:id/delete', async (c) => {
   const id = c.req.param('id');
   if (!id) return c.json({ success: false, error: 'Usage id is required' }, 400);
 
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ success: false, error: 'Invalid JSON body' }, 400);
+  }
+
+  const parsed = DeleteRecordSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json(
+      { success: false, error: 'A deletion reason is required', issues: parsed.error.issues },
+      400
+    );
+  }
+
+  const { data: existing, error: fetchError } = await supabaseAdmin
+    .from('monthly_credit_usage')
+    .select('id, client_name, invoice_id')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (fetchError) return fail(c, fetchError);
+  if (!existing) return c.json({ success: false, error: 'Usage record not found' }, 404);
+  if (existing.invoice_id) {
+    return c.json(
+      { success: false, error: 'Usage linked to an invoice cannot be deleted' },
+      409
+    );
+  }
+
   const { error } = await supabaseAdmin.from('monthly_credit_usage').delete().eq('id', id);
   if (error) return fail(c, error);
+
+  await logAudit('usage_deleted', 'usage', id, parsed.data.reason, {
+    client_name: existing.client_name,
+  });
   return c.json({ success: true, id });
 });
+
+// Deletion is intentionally only available through POST /:id/delete, which
+// requires a reason, rejects invoice-linked rows, and writes an audit entry.

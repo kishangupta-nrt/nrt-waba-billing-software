@@ -141,10 +141,23 @@ export const api = {
   saveInvoice: (invoice: Invoice) => request<Invoice>('/api/invoices', jsonBody(invoice)),
   updateInvoice: (invoice: Invoice) =>
     request<Invoice>(`/api/invoices/${encodeURIComponent(invoice.id)}`, jsonBody(invoice, 'PUT')),
-  cancelInvoice: (id: string, reason?: string) =>
+  cancelInvoice: (id: string, reason: string) =>
     request<Invoice>(`/api/invoices/${encodeURIComponent(id)}/cancel`, jsonBody({ reason })),
-  deleteInvoice: (id: string) =>
-    request<{ id: string }>(`/api/invoices/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  cancelInvoices: (ids: string[], reason: string) =>
+    request<{ cancelled: string[]; requested: number }>(
+      '/api/invoices/cancel',
+      jsonBody({ ids, reason })
+    ),
+  payInvoice: (id: string, proofUrl?: string, notes?: string) =>
+    request<Invoice>(`/api/invoices/${encodeURIComponent(id)}/pay`, jsonBody({
+      payment_proof_url: proofUrl || '',
+      payment_notes: notes || '',
+    })),
+  deleteInvoice: (id: string, reason: string) =>
+    request<{ id: string }>(
+      `/api/invoices/${encodeURIComponent(id)}/delete`,
+      jsonBody({ reason })
+    ),
   saveInvoicesBatch: (invoices: Invoice[]) => request<Invoice[]>('/api/invoices', jsonBody(invoices)),
 
   getMonthlyUsage: (month?: string, year?: number) => {
@@ -157,6 +170,9 @@ export const api = {
     request<MonthlyCreditUsage>('/api/usage', jsonBody(record)),
   saveMonthlyUsageBatch: (records: MonthlyCreditUsage[]) =>
     request<MonthlyCreditUsage[]>('/api/usage', jsonBody(records)),
-  deleteMonthlyUsage: (id: string) =>
-    request<{ id: string }>(`/api/usage/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  deleteMonthlyUsage: (id: string, reason: string) =>
+    request<{ id: string }>(
+      `/api/usage/${encodeURIComponent(id)}/delete`,
+      jsonBody({ reason })
+    ),
 };

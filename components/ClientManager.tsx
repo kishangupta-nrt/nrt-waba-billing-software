@@ -21,8 +21,8 @@ import {
   AlertCircle,
   Mail,
   Phone,
-  CheckCircle2,
 } from 'lucide-react';
+import { Toast } from './Toast';
 
 interface ClientManagerProps {
   clients: Client[];
@@ -42,6 +42,7 @@ export const ClientManager: React.FC<ClientManagerProps> = ({
   const [editingClient, setEditingClient] = useState<Client | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [pendingDeleteClient, setPendingDeleteClient] = useState<Client | null>(null);
 
   const [name, setName] = useState('');
   const [stateName, setStateName] = useState('Madhya Pradesh');
@@ -157,11 +158,15 @@ export const ClientManager: React.FC<ClientManagerProps> = ({
     }
   };
 
-  const handleDelete = async (client: Client) => {
-    if (!confirm(`Delete client "${client.name}"? Existing invoices keep their own copy of the buyer details.`)) {
-      return;
-    }
+  const handleDelete = (client: Client) => {
     setActionError(null);
+    setPendingDeleteClient(client);
+  };
+
+  const handleConfirmDelete = async () => {
+    const client = pendingDeleteClient;
+    if (!client) return;
+    setPendingDeleteClient(null);
     try {
       await onDeleteClient(client.id);
       setSuccessMessage(`Client "${client.name}" deleted.`);
@@ -242,20 +247,25 @@ export const ClientManager: React.FC<ClientManagerProps> = ({
       </div>
 
       {successMessage && (
-        <div className="flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800">
-          <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" />
-          <span>{successMessage}</span>
-        </div>
+        <Toast kind="success" message={successMessage} onClose={() => setSuccessMessage(null)} />
       )}
 
       {actionError && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800">
-          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-          <div className="flex-1">{actionError}</div>
-          <button onClick={() => setActionError(null)} className="text-red-500 hover:text-red-700" aria-label="Dismiss">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+        <Toast kind="error" message={actionError} onClose={() => setActionError(null)} />
+      )}
+
+      {pendingDeleteClient && (
+        <Toast
+          kind="info"
+          message={
+            <>
+              Delete client <strong>{pendingDeleteClient.name}</strong>? Existing invoices keep their own copy of the buyer details.
+            </>
+          }
+          actionLabel="Delete"
+          onAction={handleConfirmDelete}
+          onClose={() => setPendingDeleteClient(null)}
+        />
       )}
 
       <div className="relative max-w-sm">

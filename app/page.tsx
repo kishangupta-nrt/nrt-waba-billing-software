@@ -125,7 +125,7 @@ function BillingDashboard() {
     await loadData();
   };
 
-  const handleCancelInvoice = async (invoice: Invoice, reason?: string) => {
+  const handleCancelInvoice = async (invoice: Invoice, reason: string) => {
     await db.cancelInvoice(invoice.id, reason);
     if (selectedInvoiceForEdit?.id === invoice.id) {
       setSelectedInvoiceForEdit(null);
@@ -133,16 +133,35 @@ function BillingDashboard() {
     await loadData();
   };
 
-  const handleDeleteInvoice = async (invoice: Invoice) => {
-    await db.deleteInvoice(invoice.id);
+  const handleCancelInvoices = async (ids: string[], reason: string) => {
+    const { cancelled } = await db.cancelInvoices(ids, reason);
+    if (cancelled.includes(selectedInvoiceForEdit?.id || '')) {
+      setSelectedInvoiceForEdit(null);
+    }
+    await loadData();
+  };
+
+  const handlePayInvoice = async (
+    invoice: Invoice,
+    proofUrl?: string,
+    notes?: string
+  ): Promise<Invoice> => {
+    const saved = await db.payInvoice(invoice.id, proofUrl, notes);
+    setSelectedInvoiceForEdit(saved);
+    await loadData();
+    return saved;
+  };
+
+  const handleDeleteInvoice = async (invoice: Invoice, reason: string) => {
+    await db.deleteInvoice(invoice.id, reason);
     if (selectedInvoiceForEdit?.id === invoice.id) {
       setSelectedInvoiceForEdit(null);
     }
     await loadData();
   };
 
-  const handleDeleteUsage = async (id: string) => {
-    await db.deleteMonthlyUsage(id);
+  const handleDeleteUsage = async (id: string, reason: string) => {
+    await db.deleteMonthlyUsage(id, reason);
     await loadData();
   };
 
@@ -375,6 +394,8 @@ function BillingDashboard() {
             }}
             onRepeatInvoice={handleRepeatInvoice}
             onCancelInvoice={handleCancelInvoice}
+            onCancelInvoices={handleCancelInvoices}
+            onPayInvoice={handlePayInvoice}
             onDeleteInvoice={handleDeleteInvoice}
             onDeleteUsage={handleDeleteUsage}
           />

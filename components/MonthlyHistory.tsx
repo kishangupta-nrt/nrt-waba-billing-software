@@ -3,6 +3,7 @@
 import React, { useMemo, useState } from 'react';
 import { MonthlyCreditUsage, Invoice, CompanySettings, Client } from '@/lib/types';
 import { InvoiceTemplate } from './InvoiceTemplate';
+import { Toast } from './Toast';
 import { downloadJson } from '@/lib/csvUtils';
 import {
   calculateInvoiceTotals,
@@ -38,10 +39,14 @@ interface MonthlyHistoryProps {
   onGenerateInvoiceFromUsage: (usage: MonthlyCreditUsage) => void;
   onEditInvoice?: (invoice: Invoice) => void;
   onRepeatInvoice?: (invoice: Invoice) => void;
-  onCancelInvoice?: (invoice: Invoice, reason?: string) => Promise<void>;
-  onDeleteInvoice?: (invoice: Invoice) => Promise<void>;
-  onDeleteUsage?: (id: string) => Promise<void>;
+  onCancelInvoice?: (invoice: Invoice, reason: string) => Promise<void>;
+  onCancelInvoices?: (ids: string[], reason: string) => Promise<void>;
+  onPayInvoice?: (invoice: Invoice, proofUrl?: string, notes?: string) => Promise<Invoice>;
+  onDeleteInvoice?: (invoice: Invoice, reason: string) => Promise<void>;
+  onDeleteUsage?: (id: string, reason: string) => Promise<void>;
 }
+
+type UsageActionStatus = 'paid' | 'refused_to_pay' | 'cancelled' | 'pending';
 
 function invoiceStatusClass(status?: Invoice['status']) {
   switch (status) {
@@ -53,6 +58,32 @@ function invoiceStatusClass(status?: Invoice['status']) {
       return 'bg-amber-100 text-amber-800';
     default:
       return 'bg-blue-100 text-blue-800';
+  }
+}
+
+function usageStatusBadge(record: MonthlyCreditUsage): {
+  label: string;
+  className: string;
+  title?: string;
+} {
+  if (record.billed) return { label: 'Billed', className: 'text-emerald-700 bg-emerald-100' };
+  switch (record.status) {
+    case 'paid':
+      return { label: 'Paid', className: 'text-emerald-700 bg-emerald-100' };
+    case 'refused_to_pay':
+      return {
+        label: 'Refused',
+        className: 'text-red-700 bg-red-100',
+        title: record.status_reason || 'Refused to pay',
+      };
+    case 'cancelled':
+      return {
+        label: 'Cancelled',
+        className: 'text-slate-700 bg-slate-200',
+        title: record.status_reason || 'Cancelled',
+      };
+    default:
+      return { label: 'Pending', className: 'text-amber-700 bg-amber-100' };
   }
 }
 
@@ -104,6 +135,8 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
   onEditInvoice,
   onRepeatInvoice,
   onCancelInvoice,
+  onCancelInvoices,
+  onPayInvoice,
   onDeleteInvoice,
   onDeleteUsage,
 }) => {
@@ -115,6 +148,7 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
   const [statusFilter, setStatusFilter] = useState<Invoice['status'] | ''>('');
   const [viewTab, setViewTab] = useState<'usage' | 'invoices'>('usage');
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
   // Modal States
   const [editModalRecord, setEditModalRecord] = useState<MonthlyCreditUsage | null>(null);
@@ -122,9 +156,15 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
 
   // Cancellation Modal State (Single & Bulk)
   const [cancelModalInvoice, setCancelModalInvoice] = useState<Invoice | null>(null);
-  const [cancelReason, setCancelReason] = useState<string>('Client requested revision');
+  const [cancelReason, setCancelReason] = useState<string>('Client requested cancellation');
   const [isBulkCancelMode, setIsBulkCancelMode] = useState(false);
   const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<Set<string>>(new Set());
+
+  // Reason-gated delete modals
+  const [deleteInvoiceModal, setDeleteInvoiceModal] = useState<Invoice | null>(null);
+  const [deleteInvoiceReason, setDeleteInvoiceReason] = useState<string>('');
+  const [deleteUsageModal, setDeleteUsageModal] = useState<MonthlyCreditUsage | null>(null);
+  const [deleteUsageReason, setDeleteUsageReason] = useState<string>('');
 
   // Mark as Paid with Proof Modal State
   const [paidModalInvoice, setPaidModalInvoice] = useState<Invoice | null>(null);
@@ -134,9 +174,10 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
 
   // Usage Status / Action Modal State
   const [usageActionRecord, setUsageActionRecord] = useState<MonthlyCreditUsage | null>(null);
-  const [usageNewStatus, setUsageNewStatus] = useState<'paid' | 'refused_to_pay' | 'cancelled' | 'pending'>('paid');
+  const [usageNewStatus, setUsageNewStatus] = useState<UsageActionStatus>('paid');
   const [usageReason, setUsageReason] = useState<string>('');
   const [usageProofUrl, setUsageProofUrl] = useState<string>('');
+  const [isDraggingUsageFile, setIsDraggingUsageFile] = useState(false);
 
   const [editRate, setEditRate] = useState<number>(0.3650);
   const [editCredits, setEditCredits] = useState<number>(0);
@@ -240,68 +281,82 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
   }, [clients, periodUsage, periodInvoices]);
 
   const handleExecuteCancelInvoice = async () => {
-    if (!onCancelInvoice) return;
-    if (isBulkCancelMode) {
-      if (selectedInvoiceIds.size === 0) return;
-      setActionError(null);
-      try {
-        const toCancel = invoices.filter(i => selectedInvoiceIds.has(i.id) && i.status !== 'Cancelled');
-        for (const inv of toCancel) {
-          await onCancelInvoice(inv, cancelReason);
-        }
+    if (!cancelReason.trim()) {
+      setActionError('A cancellation reason is required.');
+      return;
+    }
+    setActionError(null);
+    try {
+      if (isBulkCancelMode) {
+        if (!onCancelInvoices || selectedInvoiceIds.size === 0) return;
+        const ids = invoices
+          .filter(i => selectedInvoiceIds.has(i.id) && i.status !== 'Cancelled')
+          .map(i => i.id);
+        if (ids.length === 0) return;
+        await onCancelInvoices(ids, cancelReason.trim());
         setSelectedInvoiceIds(new Set());
-        setCancelModalInvoice(null);
         setIsBulkCancelMode(false);
-      } catch (err) {
-        setActionError(err instanceof Error ? err.message : 'Unable to cancel selected invoices.');
-      }
-    } else if (cancelModalInvoice) {
-      setActionError(null);
-      try {
-        await onCancelInvoice(cancelModalInvoice, cancelReason);
-        setCancelModalInvoice(null);
+      } else if (cancelModalInvoice && onCancelInvoice) {
+        await onCancelInvoice(cancelModalInvoice, cancelReason.trim());
         setViewInvoiceModal(null);
-      } catch (err) {
-        setActionError(err instanceof Error ? err.message : 'Unable to cancel invoice.');
       }
+      setCancelModalInvoice(null);
+      setActionSuccess(isBulkCancelMode ? 'Selected invoices cancelled.' : 'Invoice cancelled.');
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Unable to cancel invoice(s).');
     }
   };
 
-  const handleDeleteInvoiceDirect = async (invoice: Invoice) => {
-    if (!onDeleteInvoice) return;
-    const confirmed = window.confirm(
-      `Permanently delete ${invoice.voucher_no}? This removes the invoice completely and releases any linked usage back to pending.`
-    );
-    if (!confirmed) return;
+  const handleExecuteDeleteInvoice = async () => {
+    if (!deleteInvoiceModal || !onDeleteInvoice) return;
+    if (!deleteInvoiceReason.trim()) {
+      setActionError('A deletion reason is required.');
+      return;
+    }
     setActionError(null);
     try {
-      await onDeleteInvoice(invoice);
+      await onDeleteInvoice(deleteInvoiceModal, deleteInvoiceReason.trim());
+      setDeleteInvoiceModal(null);
+      setDeleteInvoiceReason('');
       setViewInvoiceModal(null);
+      setSelectedInvoiceIds(prev => {
+        const next = new Set(prev);
+        next.delete(deleteInvoiceModal.id);
+        return next;
+      });
+      setActionSuccess(`Invoice ${deleteInvoiceModal.voucher_no} deleted.`);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Unable to delete invoice.');
     }
   };
 
-  const handleExecuteSavePaid = async () => {
-    if (!paidModalInvoice) return;
+  const handleExecuteDeleteUsage = async () => {
+    if (!deleteUsageModal || !onDeleteUsage) return;
+    if (!deleteUsageReason.trim()) {
+      setActionError('A deletion reason is required.');
+      return;
+    }
     setActionError(null);
     try {
-      const updated: Invoice = {
-        ...paidModalInvoice,
-        status: 'Paid',
-        payment_proof_url: paidProofUrl || undefined,
-        payment_notes: paidNotes || undefined,
-      };
-      if (onEditInvoice) {
-        await onUpdateUsage?.({} as MonthlyCreditUsage); // trigger parent reload if needed
-      }
-      // Save directly through db / api
-      const { db } = await import('@/lib/db');
-      await db.updateInvoice(updated);
+      await onDeleteUsage(deleteUsageModal.id, deleteUsageReason.trim());
+      setDeleteUsageModal(null);
+      setDeleteUsageReason('');
+      setUsageActionRecord(null);
+      setActionSuccess('Credit usage entry deleted.');
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Unable to delete usage entry.');
+    }
+  };
+
+  const handleExecuteSavePaid = async () => {
+    if (!paidModalInvoice || !onPayInvoice) return;
+    setActionError(null);
+    try {
+      await onPayInvoice(paidModalInvoice, paidProofUrl || undefined, paidNotes || undefined);
       setPaidModalInvoice(null);
       setPaidProofUrl('');
       setPaidNotes('');
-      window.location.reload(); // Refresh data smoothly
+      setActionSuccess('Invoice marked as paid.');
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Unable to mark invoice as paid.');
     }
@@ -309,45 +364,44 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
 
   const handleExecuteUsageStatus = async () => {
     if (!usageActionRecord) return;
+    const reasonRequired = usageNewStatus === 'refused_to_pay' || usageNewStatus === 'cancelled';
+    if (reasonRequired && !usageReason.trim()) {
+      setActionError('A reason is required for refused-to-pay or cancelled usage.');
+      return;
+    }
     setActionError(null);
     try {
       const updated: MonthlyCreditUsage = {
         ...usageActionRecord,
         status: usageNewStatus,
-        status_reason: usageReason || undefined,
-        payment_proof_url: usageProofUrl || undefined,
-        billed: usageNewStatus === 'paid',
+        status_reason: usageReason.trim() || undefined,
+        payment_proof_url: usageNewStatus === 'paid' ? usageProofUrl || undefined : undefined,
+        // Direct payment does not create an invoice; keep the billed link untouched.
+        billed: usageActionRecord.billed,
         updated_at: new Date().toISOString(),
       };
       await onUpdateUsage(updated);
       setUsageActionRecord(null);
       setUsageReason('');
       setUsageProofUrl('');
+      setActionSuccess('Credit usage status saved.');
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Unable to update credit usage status.');
     }
   };
 
-  const handleDeleteUsageRecord = async (record: MonthlyCreditUsage) => {
-    if (!onDeleteUsage) return;
-    const reasonPrompt = window.prompt(
-      `Delete monthly usage entry for "${record.client_name}" (${record.total_credits} credits)?\nEnter reason for audit:`
-    );
-    if (reasonPrompt === null) return;
-    setActionError(null);
-    try {
-      await onDeleteUsage(record.id);
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Unable to delete usage entry.');
-    }
-  };
-
   const handleFileUpload = (file: File, target: 'invoice' | 'usage') => {
     if (!file) return;
-    if (file.size > 5 * 1024 * 1024) {
-      setActionError('File size too large. Maximum file size is 5MB.');
+    // Base64 expands by ~33%; keep payload under the API body limit.
+    if (file.size > 4 * 1024 * 1024) {
+      setActionError('File is too large. Maximum size is 4 MB.');
       return;
     }
+    if (!file.type.startsWith('image/') && file.type !== 'application/pdf') {
+      setActionError('Please choose an image or PDF file.');
+      return;
+    }
+    setActionError(null);
     const reader = new FileReader();
     reader.onload = (e) => {
       const result = e.target?.result as string;
@@ -357,7 +411,23 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
         setUsageProofUrl(result);
       }
     };
+    reader.onerror = () => setActionError('Unable to read the selected file. Please try again.');
     reader.readAsDataURL(file);
+  };
+
+  const toggleInvoiceSelection = (id: string) => {
+    setSelectedInvoiceIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAllInvoices = () => {
+    const selectable = filteredInvoices.filter(inv => inv.status !== 'Cancelled').map(inv => inv.id);
+    const allSelected = selectable.length > 0 && selectable.every(id => selectedInvoiceIds.has(id));
+    setSelectedInvoiceIds(allSelected ? new Set() : new Set(selectable));
   };
 
   const handleOpenEdit = (record: MonthlyCreditUsage) => {
@@ -590,6 +660,21 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
               </select>
             )}
 
+            {viewTab === 'invoices' && onCancelInvoices && selectedInvoiceIds.size > 0 && (
+              <button
+                onClick={() => {
+                  setIsBulkCancelMode(true);
+                  setCancelReason('Client requested cancellation');
+                  setActionError(null);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 px-3 py-2 text-xs font-bold text-white"
+                title="Cancel all selected invoices with one shared reason"
+              >
+                <Ban className="w-3.5 h-3.5" />
+                Cancel Selected ({selectedInvoiceIds.size})
+              </button>
+            )}
+
             <button
               onClick={handleBackupMonth}
               disabled={isBackingUp}
@@ -685,13 +770,11 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
       </div>
 
       {actionError && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800">
-          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-          <div className="flex-1">{actionError}</div>
-          <button onClick={() => setActionError(null)} className="text-red-500 hover:text-red-700" aria-label="Dismiss">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+        <Toast kind="error" message={actionError} onClose={() => setActionError(null)} />
+      )}
+
+      {!actionError && actionSuccess && (
+        <Toast kind="success" message={actionSuccess} onClose={() => setActionSuccess(null)} />
       )}
 
       {viewTab === 'usage' ? (
@@ -807,6 +890,8 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
                                     setUsageActionRecord(rec);
                                     setUsageNewStatus(rec.status === 'paid' ? 'paid' : 'refused_to_pay');
                                     setUsageReason(rec.status_reason || '');
+                                    setUsageProofUrl(rec.payment_proof_url || '');
+                                    setActionError(null);
                                   }}
                                   className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded transition-colors"
                                   title="Set payment / refusal / cancel status"
@@ -814,9 +899,13 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
                                   Status
                                 </button>
                                 <button
-                                  onClick={() => handleDeleteUsageRecord(rec)}
+                                  onClick={() => {
+                                    setDeleteUsageModal(rec);
+                                    setDeleteUsageReason('');
+                                    setActionError(null);
+                                  }}
                                   className="inline-flex items-center gap-1 text-[11px] font-medium text-red-600 hover:text-red-800 bg-red-50 hover:bg-red-100 px-2 py-1 rounded transition-colors"
-                                  title="Delete usage record"
+                                  title="Delete usage record with reason"
                                 >
                                   <X className="w-3 h-3" />
                                 </button>
@@ -861,13 +950,10 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
                         )}
                       </div>
                       <span
-                        className={`shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                          rec.billed
-                            ? 'text-emerald-700 bg-emerald-100'
-                            : 'text-amber-700 bg-amber-100'
-                        }`}
+                        className={`shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full ${usageStatusBadge(rec).className}`}
+                        title={usageStatusBadge(rec).title}
                       >
-                        {rec.billed ? 'Billed' : 'Pending'}
+                        {usageStatusBadge(rec).label}
                       </span>
                     </div>
 
@@ -938,6 +1024,35 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
                         <Edit3 className="w-3.5 h-3.5" />
                         Edit
                       </button>
+                      {!rec.billed && (
+                        <>
+                          <button
+                            onClick={() => {
+                              setUsageActionRecord(rec);
+                              setUsageNewStatus(rec.status === 'paid' ? 'paid' : 'refused_to_pay');
+                              setUsageReason(rec.status_reason || '');
+                              setUsageProofUrl(rec.payment_proof_url || '');
+                              setActionError(null);
+                            }}
+                            className="inline-flex items-center justify-center gap-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-lg"
+                            title="Set paid / refused / cancel status"
+                          >
+                            Status
+                          </button>
+                          <button
+                            onClick={() => {
+                              setDeleteUsageModal(rec);
+                              setDeleteUsageReason('');
+                              setActionError(null);
+                            }}
+                            className="inline-flex items-center justify-center gap-1 text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 px-3 py-2 rounded-lg"
+                            title="Delete with reason"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                            Delete
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
                 );
@@ -951,6 +1066,19 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
             <table className="w-full text-left text-xs border-collapse">
               <thead>
                 <tr className="bg-slate-900 text-white font-bold border-b border-slate-800">
+                  <th className="p-3 w-8">
+                    <input
+                      type="checkbox"
+                      checked={
+                        filteredInvoices.length > 0 &&
+                        filteredInvoices.filter(inv => inv.status !== 'Cancelled').every(inv => selectedInvoiceIds.has(inv.id))
+                      }
+                      onChange={toggleSelectAllInvoices}
+                      disabled={!onCancelInvoices || filteredInvoices.every(inv => inv.status === 'Cancelled')}
+                      aria-label="Select all invoices in this period"
+                      className="h-3.5 w-3.5 accent-orange-600"
+                    />
+                  </th>
                   <th className="p-3">Voucher No.</th>
                   <th className="p-3">Date</th>
                   <th className="p-3">Buyer</th>
@@ -963,7 +1091,7 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
               <tbody className="divide-y divide-slate-200">
                 {filteredInvoices.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="text-center p-8 text-slate-400">
+                    <td colSpan={8} className="text-center p-8 text-slate-400">
                       No invoices found for {selectedPeriodLabel}.
                     </td>
                   </tr>
@@ -971,7 +1099,22 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
                   filteredInvoices.map(inv => {
                     const tax = invoiceBreakdown(inv);
                     return (
-                      <tr key={inv.id} className="hover:bg-slate-50 transition-colors align-top">
+                      <tr
+                        key={inv.id}
+                        className={`hover:bg-slate-50 transition-colors align-top ${
+                          selectedInvoiceIds.has(inv.id) ? 'bg-amber-50' : ''
+                        }`}
+                      >
+                        <td className="p-3 align-middle">
+                          <input
+                            type="checkbox"
+                            checked={selectedInvoiceIds.has(inv.id)}
+                            onChange={() => toggleInvoiceSelection(inv.id)}
+                            disabled={!onCancelInvoices || inv.status === 'Cancelled'}
+                            aria-label={`Select invoice ${inv.voucher_no}`}
+                            className="h-3.5 w-3.5 accent-orange-600"
+                          />
+                        </td>
                         <td className="p-3 font-mono font-bold text-orange-700 break-all">
                           {inv.voucher_no}
                           <span className={`mt-1 block w-fit text-[10px] font-bold px-1.5 py-0.5 rounded ${invoiceStatusClass(inv.status)}`}>
@@ -1019,6 +1162,7 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
                                   setPaidModalInvoice(inv);
                                   setPaidProofUrl(inv.payment_proof_url || '');
                                   setPaidNotes(inv.payment_notes || '');
+                                  setActionError(null);
                                 }}
                                 className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 px-2 py-1 rounded transition-colors"
                                 title="Mark as Paid and upload payment screenshot proof"
@@ -1062,7 +1206,11 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
                             )}
                             {onDeleteInvoice && (
                               <button
-                                onClick={() => handleDeleteInvoiceDirect(inv)}
+                                onClick={() => {
+                                setDeleteInvoiceModal(inv);
+                                setDeleteInvoiceReason('');
+                                setActionError(null);
+                              }}
                                 className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 hover:text-red-800 bg-red-50 hover:bg-red-100 px-2 py-1 rounded transition-colors"
                                 title="Delete this invoice (if generated with error)"
                               >
@@ -1089,8 +1237,18 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
               filteredInvoices.map(inv => {
                 const tax = invoiceBreakdown(inv);
                 return (
-                  <div key={inv.id} className="p-4 space-y-2">
+                  <div key={inv.id} className={`p-4 space-y-2 ${selectedInvoiceIds.has(inv.id) ? 'bg-amber-50' : ''}`}>
                     <div className="flex items-start justify-between gap-2">
+                      {onCancelInvoices && (
+                        <input
+                          type="checkbox"
+                          checked={selectedInvoiceIds.has(inv.id)}
+                          onChange={() => toggleInvoiceSelection(inv.id)}
+                          disabled={inv.status === 'Cancelled'}
+                          aria-label={`Select invoice ${inv.voucher_no}`}
+                          className="mt-1 h-4 w-4 shrink-0 accent-orange-600"
+                        />
+                      )}
                       <div className="min-w-0">
                         <div className="font-bold text-slate-900 text-sm break-words">{inv.buyer_name}</div>
                         <div className="text-[10px] font-mono text-orange-700 break-all">{inv.voucher_no}</div>
@@ -1164,17 +1322,45 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
                           Repeat
                         </button>
                       )}
+                      {onPayInvoice && inv.status !== 'Paid' && inv.status !== 'Cancelled' && (
+                        <button
+                          onClick={() => {
+                            setPaidModalInvoice(inv);
+                            setPaidProofUrl(inv.payment_proof_url || '');
+                            setPaidNotes(inv.payment_notes || '');
+                            setActionError(null);
+                          }}
+                          className="flex-1 inline-flex items-center justify-center gap-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2 py-2 rounded-lg"
+                        >
+                          <CheckCircle className="w-3.5 h-3.5" />
+                          Paid
+                        </button>
+                      )}
                       {onCancelInvoice && (inv.status || 'Sent') !== 'Cancelled' && (
                         <button
                           onClick={() => {
                             setCancelModalInvoice(inv);
                             setIsBulkCancelMode(false);
                             setCancelReason('Client requested cancellation');
+                            setActionError(null);
                           }}
-                          className="flex-1 inline-flex items-center justify-center gap-1 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 px-2 py-2 rounded-lg"
+                          className="flex-1 inline-flex items-center justify-center gap-1 text-xs font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 px-2 py-2 rounded-lg"
                         >
                           <Ban className="w-3.5 h-3.5" />
                           Cancel
+                        </button>
+                      )}
+                      {onDeleteInvoice && (
+                        <button
+                          onClick={() => {
+                            setDeleteInvoiceModal(inv);
+                            setDeleteInvoiceReason('');
+                            setActionError(null);
+                          }}
+                          className="flex-1 inline-flex items-center justify-center gap-1 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 px-2 py-2 rounded-lg"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                          Delete
                         </button>
                       )}
                     </div>
@@ -1325,21 +1511,34 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
         </div>
       )}
 
-      {/* Invoice Cancellation Modal with Audit Reason */}
-      {cancelModalInvoice && (
+      {/* Invoice Cancellation Modal with Audit Reason (single + bulk) */}
+      {(cancelModalInvoice || isBulkCancelMode) && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-3">
           <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
             <div className="flex items-center justify-between border-b pb-3">
               <h3 className="text-sm font-bold text-red-700 flex items-center gap-2">
                 <Ban className="w-4 h-4" />
-                Cancel Invoice {cancelModalInvoice.voucher_no}
+                {isBulkCancelMode
+                  ? `Cancel ${selectedInvoiceIds.size} Selected Invoice(s)`
+                  : `Cancel Invoice ${cancelModalInvoice?.voucher_no || ''}`}
               </h3>
-              <button onClick={() => setCancelModalInvoice(null)} className="text-slate-400 hover:text-slate-600">
+              <button
+                onClick={() => {
+                  setCancelModalInvoice(null);
+                  setIsBulkCancelMode(false);
+                }}
+                className="text-slate-400 hover:text-slate-600"
+                aria-label="Close cancellation modal"
+              >
                 <X className="w-4 h-4" />
               </button>
             </div>
             <p className="text-xs text-slate-600">
-              Cancelling will keep the invoice in records with status <strong>Cancelled</strong>, void the tax liability, and release the monthly usage back to pending.
+              {isBulkCancelMode ? (
+                <>All selected invoices will receive the same reason. Cancelled invoices stay in records as void and their monthly usage returns to pending.</>
+              ) : (
+                <>Cancelling will keep the invoice in records with status <strong>Cancelled</strong>, void the tax liability, and release the monthly usage back to pending.</>
+              )}
             </p>
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
@@ -1356,7 +1555,10 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
             <div className="flex justify-end gap-2 pt-2 border-t">
               <button
                 type="button"
-                onClick={() => setCancelModalInvoice(null)}
+                onClick={() => {
+                  setCancelModalInvoice(null);
+                  setIsBulkCancelMode(false);
+                }}
                 className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg"
               >
                 Back
@@ -1368,6 +1570,114 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
                 className="px-4 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded-lg shadow-sm"
               >
                 Confirm Cancellation
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Invoice hard-delete (for PIs generated in error) - reason required */}
+      {deleteInvoiceModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-3">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
+            <div className="flex items-center justify-between border-b pb-3">
+              <h3 className="text-sm font-bold text-red-700 flex items-center gap-2">
+                <X className="w-4 h-4" />
+                Delete Invoice {deleteInvoiceModal.voucher_no}
+              </h3>
+              <button
+                onClick={() => setDeleteInvoiceModal(null)}
+                className="text-slate-400 hover:text-slate-600"
+                aria-label="Close delete modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-600">
+              This permanently removes the PI and releases its monthly usage back to pending. Use this when a PI was generated with an error; use <strong>Cancel</strong> when the PI was legitimately issued and later voided.
+            </p>
+            <div>
+              <label htmlFor="delete-invoice-reason" className="block text-xs font-semibold text-slate-700 mb-1">
+                Reason for Deletion *
+              </label>
+              <textarea
+                id="delete-invoice-reason"
+                value={deleteInvoiceReason}
+                onChange={(e) => setDeleteInvoiceReason(e.target.value)}
+                rows={3}
+                placeholder="e.g. Generated with wrong credit rate / duplicate PI / wrong buyer"
+                className="w-full text-xs rounded-lg border border-slate-300 p-2 focus:ring-2 focus:ring-orange-500"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t">
+              <button
+                type="button"
+                onClick={() => setDeleteInvoiceModal(null)}
+                className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg"
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                onClick={handleExecuteDeleteInvoice}
+                disabled={!deleteInvoiceReason.trim()}
+                className="px-4 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded-lg shadow-sm"
+              >
+                Permanently Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Credit usage hard-delete - reason required */}
+      {deleteUsageModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-3">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
+            <div className="flex items-center justify-between border-b pb-3">
+              <h3 className="text-sm font-bold text-red-700 flex items-center gap-2">
+                <X className="w-4 h-4" />
+                Delete Credit Usage Entry
+              </h3>
+              <button
+                onClick={() => setDeleteUsageModal(null)}
+                className="text-slate-400 hover:text-slate-600"
+                aria-label="Close delete usage modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-600">
+              {deleteUsageModal.client_name} • {Number(deleteUsageModal.total_credits || 0).toLocaleString()} credits for {deleteUsageModal.month} {deleteUsageModal.year}. This entry will be permanently removed and cannot be restored.
+            </p>
+            <div>
+              <label htmlFor="delete-usage-reason" className="block text-xs font-semibold text-slate-700 mb-1">
+                Reason for Deletion *
+              </label>
+              <textarea
+                id="delete-usage-reason"
+                value={deleteUsageReason}
+                onChange={(e) => setDeleteUsageReason(e.target.value)}
+                rows={3}
+                placeholder="e.g. Duplicate usage row / credits entered against wrong client"
+                className="w-full text-xs rounded-lg border border-slate-300 p-2 focus:ring-2 focus:ring-orange-500"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t">
+              <button
+                type="button"
+                onClick={() => setDeleteUsageModal(null)}
+                className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg"
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                onClick={handleExecuteDeleteUsage}
+                disabled={!deleteUsageReason.trim()}
+                className="px-4 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded-lg shadow-sm"
+              >
+                Permanently Delete
               </button>
             </div>
           </div>
@@ -1422,6 +1732,8 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
                   <div className="space-y-1">
                     <span className="text-xs font-bold text-emerald-600">✓ Screenshot Attached</span>
                     {paidProofUrl.startsWith('data:image') && (
+                      // Data-URL previews cannot go through next/image on a static export.
+                      // eslint-disable-next-line @next/next/no-img-element
                       <img src={paidProofUrl} alt="Payment Proof" className="max-h-28 mx-auto rounded border" />
                     )}
                     <span className="text-[10px] text-slate-400 block">Click or drag another to replace</span>
@@ -1429,7 +1741,7 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
                 ) : (
                   <div className="space-y-1 text-slate-500 text-xs">
                     <p className="font-semibold text-slate-700">Drag & drop payment screenshot here</p>
-                    <p className="text-[10px]">or click to select from local disk (PNG, JPG, PDF up to 5MB)</p>
+                    <p className="text-[10px]">or click to select from local disk (PNG, JPG, PDF up to 4 MB)</p>
                   </div>
                 )}
               </div>
@@ -1485,10 +1797,11 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
             </p>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Status</label>
+              <label htmlFor="usage-new-status" className="block text-xs font-semibold text-slate-700 mb-1">Status</label>
               <select
+                id="usage-new-status"
                 value={usageNewStatus}
-                onChange={(e) => setUsageNewStatus(e.target.value as any)}
+                onChange={(e) => setUsageNewStatus(e.target.value as UsageActionStatus)}
                 className="w-full text-xs rounded-lg border border-slate-300 p-2"
               >
                 <option value="paid">Paid Directly</option>
@@ -1499,10 +1812,11 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
+              <label htmlFor="usage-status-reason" className="block text-xs font-semibold text-slate-700 mb-1">
                 Reason / Note {usageNewStatus === 'refused_to_pay' || usageNewStatus === 'cancelled' ? '*' : '(Optional)'}
               </label>
               <textarea
+                id="usage-status-reason"
                 value={usageReason}
                 onChange={(e) => setUsageReason(e.target.value)}
                 rows={2}
@@ -1514,9 +1828,16 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
             {usageNewStatus === 'paid' && (
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Payment Proof (Drag & Drop or Click)
+                  Payment Screenshot / Receipt (Optional)
                 </label>
                 <div
+                  onDragOver={(e) => { e.preventDefault(); setIsDraggingUsageFile(true); }}
+                  onDragLeave={() => setIsDraggingUsageFile(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsDraggingUsageFile(false);
+                    if (e.dataTransfer.files?.[0]) handleFileUpload(e.dataTransfer.files[0], 'usage');
+                  }}
                   onClick={() => {
                     const input = document.createElement('input');
                     input.type = 'file';
@@ -1527,32 +1848,58 @@ export const MonthlyHistory: React.FC<MonthlyHistoryProps> = ({
                     };
                     input.click();
                   }}
-                  className="border-2 border-dashed border-slate-300 rounded-lg p-3 text-center cursor-pointer text-xs text-slate-500 bg-slate-50 hover:border-orange-400"
+                  className={`border-2 border-dashed rounded-lg p-3 text-center cursor-pointer text-xs bg-slate-50 transition-colors ${
+                    isDraggingUsageFile
+                      ? 'border-orange-500 bg-orange-50 text-orange-700'
+                      : 'border-slate-300 text-slate-500 hover:border-orange-400'
+                  }`}
                 >
                   {usageProofUrl ? (
-                    <span className="text-emerald-600 font-bold">✓ Screenshot Attached</span>
+                    <span className="text-emerald-600 font-bold">✓ Screenshot Attached — click or drag to replace</span>
                   ) : (
-                    <span>Click or drag screenshot</span>
+                    <span>Drag & drop screenshot here, or click to select from local disk (max 4 MB)</span>
                   )}
                 </div>
               </div>
             )}
 
-            <div className="flex justify-end gap-2 pt-2 border-t">
-              <button
-                type="button"
-                onClick={() => setUsageActionRecord(null)}
-                className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleExecuteUsageStatus}
-                className="px-4 py-1.5 text-xs font-bold text-white bg-orange-600 hover:bg-orange-700 rounded-lg shadow-sm"
-              >
-                Save Status
-              </button>
+            <div className="flex justify-between gap-2 pt-2 border-t">
+              {onDeleteUsage ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeleteUsageModal(usageActionRecord);
+                    setDeleteUsageReason('');
+                    setUsageActionRecord(null);
+                    setActionError(null);
+                  }}
+                  className="px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50 rounded-lg"
+                >
+                  Delete Entry…
+                </button>
+              ) : (
+                <span />
+              )}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setUsageActionRecord(null)}
+                  className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExecuteUsageStatus}
+                  disabled={
+                    (usageNewStatus === 'refused_to_pay' || usageNewStatus === 'cancelled') &&
+                    !usageReason.trim()
+                  }
+                  className="px-4 py-1.5 text-xs font-bold text-white bg-orange-600 hover:bg-orange-700 disabled:opacity-50 rounded-lg shadow-sm"
+                >
+                  Save Status
+                </button>
+              </div>
             </div>
           </div>
         </div>

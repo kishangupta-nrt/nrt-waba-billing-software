@@ -17,6 +17,7 @@ const CLIENTS_KEY = 'waba_clients';
 const INVOICES_KEY = 'waba_invoices';
 const USAGE_KEY = 'waba_monthly_usage';
 const SETTINGS_KEY = 'waba_settings';
+const AUDIT_KEY = 'waba_audit_log';
 
 function getLocal<T>(key: string, fallback: T): T {
   if (typeof window === 'undefined') return fallback;
@@ -32,6 +33,39 @@ function getLocal<T>(key: string, fallback: T): T {
 function setLocal<T>(key: string, value: T): void {
   if (typeof window === 'undefined') return;
   localStorage.setItem(key, JSON.stringify(value));
+}
+
+interface LocalAuditEntry {
+  action: string;
+  entityType: 'invoice' | 'usage';
+  entityId: string;
+  reason?: string;
+  createdAt: string;
+}
+
+function appendLocalAudit(entry: Omit<LocalAuditEntry, 'createdAt'>): void {
+  const entries = getLocal<LocalAuditEntry[]>(AUDIT_KEY, []);
+  setLocal(AUDIT_KEY, [{ ...entry, createdAt: new Date().toISOString() }, ...entries].slice(0, 500));
+}
+
+function releaseLocalUsageForInvoices(ids: string[]): void {
+  if (ids.length === 0) return;
+  const target = new Set(ids);
+  const usage = getLocal<MonthlyCreditUsage[]>(USAGE_KEY, []).map(record =>
+    record.invoice_id && target.has(record.invoice_id)
+      ? {
+          ...record,
+          invoice_id: undefined,
+          invoice_voucher_no: undefined,
+          billed: false,
+          status: 'pending' as const,
+          status_reason: undefined,
+          payment_proof_url: undefined,
+          updated_at: new Date().toISOString(),
+        }
+      : record
+  );
+  setLocal(USAGE_KEY, usage);
 }
 
 export const db = {
@@ -130,7 +164,7 @@ export const db = {
     return invoice;
   },
 
-  async cancelInvoice(id: string, reason?: string): Promise<Invoice> {
+  async cancelInvoice(id: string, reason: string): Promise<Invoice> {
     if (isApiEnabled()) return api.cancelInvoice(id, reason);
     requireProductionApi();
 
@@ -141,33 +175,71 @@ export const db = {
     updated[idx] = {
       ...updated[idx],
       status: 'Cancelled',
-      cancellation_reason: reason || 'Cancelled by user',
+      cancellation_reason: reason,
     };
     setLocal(INVOICES_KEY, updated);
-
-    const usage = getLocal<MonthlyCreditUsage[]>(USAGE_KEY, []).map(record =>
-      record.invoice_id === id
-        ? {
-            ...record,
-            invoice_id: undefined,
-            invoice_voucher_no: undefined,
-            billed: false,
-            updated_at: new Date().toISOString(),
-          }
-        : record
-    );
-    setLocal(USAGE_KEY, usage);
+    releaseLocalUsageForInvoices([id]);
+    appendLocalAudit({ action: 'invoice_cancelled', entityType: 'invoice', entityId: id, reason });
     return updated[idx];
   },
 
-  async deleteInvoice(id: string): Promise<void> {
+  async cancelInvoices(ids: string[], reason: string): Promise<{ cancelled: string[] }> {
+    if (isApiEnabled()) return api.cancelInvoices(ids, reason);
+    requireProductionApi();
+
+    const target = Array.from(new Set(ids));
+    const invoices = getLocal<Invoice[]>(INVOICES_KEY, []);
+    const cancelled: string[] = [];
+    const updated = invoices.map(invoice => {
+      if (!target.includes(invoice.id) || invoice.status === 'Cancelled') return invoice;
+      cancelled.push(invoice.id);
+      return { ...invoice, status: 'Cancelled' as const, cancellation_reason: reason };
+    });
+    setLocal(INVOICES_KEY, updated);
+    releaseLocalUsageForInvoices(cancelled);
+    cancelled.forEach(id =>
+      appendLocalAudit({ action: 'invoice_cancelled', entityType: 'invoice', entityId: id, reason })
+    );
+    return { cancelled };
+  },
+
+  async payInvoice(id: string, proofUrl?: string, notes?: string): Promise<Invoice> {
+    if (isApiEnabled()) return api.payInvoice(id, proofUrl, notes);
+    requireProductionApi();
+
+    const invoices = getLocal<Invoice[]>(INVOICES_KEY, []);
+    const idx = invoices.findIndex(i => i.id === id);
+    if (idx < 0) throw new ApiError('Invoice not found', 404);
+    if (invoices[idx].status === 'Cancelled') {
+      throw new ApiError('A cancelled invoice cannot be marked as paid', 409);
+    }
+    const updated = [...invoices];
+    updated[idx] = {
+      ...updated[idx],
+      status: 'Paid',
+      payment_proof_url: proofUrl || undefined,
+      payment_notes: notes || undefined,
+    };
+    setLocal(INVOICES_KEY, updated);
+    appendLocalAudit({
+      action: 'invoice_paid',
+      entityType: 'invoice',
+      entityId: id,
+      reason: notes || undefined,
+    });
+    return updated[idx];
+  },
+
+  async deleteInvoice(id: string, reason: string): Promise<void> {
     if (isApiEnabled()) {
-      await api.deleteInvoice(id);
+      await api.deleteInvoice(id, reason);
       return;
     }
     requireProductionApi();
     const invoices = getLocal<Invoice[]>(INVOICES_KEY, []).filter(i => i.id !== id);
     setLocal(INVOICES_KEY, invoices);
+    releaseLocalUsageForInvoices([id]);
+    appendLocalAudit({ action: 'invoice_deleted', entityType: 'invoice', entityId: id, reason });
   },
 
   async saveInvoicesBatch(newInvoices: Invoice[]): Promise<Invoice[]> {
@@ -219,13 +291,14 @@ export const db = {
     setLocal(USAGE_KEY, Array.from(map.values()));
   },
 
-  async deleteMonthlyUsage(id: string): Promise<void> {
+  async deleteMonthlyUsage(id: string, reason: string): Promise<void> {
     if (isApiEnabled()) {
-      await api.deleteMonthlyUsage(id);
+      await api.deleteMonthlyUsage(id, reason);
       return;
     }
     requireProductionApi();
     const all = getLocal<MonthlyCreditUsage[]>(USAGE_KEY, []).filter(u => u.id !== id);
     setLocal(USAGE_KEY, all);
+    appendLocalAudit({ action: 'usage_deleted', entityType: 'usage', entityId: id, reason });
   },
 };

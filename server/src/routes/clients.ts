@@ -84,7 +84,9 @@ clients.post('/', async (c) => {
     const { data: duplicate, error: duplicateError } = await supabaseAdmin
       .from('clients')
       .select('id, name')
-      .ilike('name', input.name)
+      // Escape LIKE wildcards so a name containing % or _ cannot broaden the
+      // duplicate check. Backslash is Postgres' default LIKE escape character.
+      .ilike('name', input.name.replace(/[\\%_]/g, '\\$&'))
       .neq('id', targetId)
       .limit(1);
 

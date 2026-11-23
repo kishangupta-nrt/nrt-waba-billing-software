@@ -16,7 +16,10 @@ A static Next.js frontend and a Hono API for generating WABA (WhatsApp Business 
 - Batch billing from a CSV or editable table, with ZIP download and per-invoice print.
 - CGST/SGST or IGST calculations, per-line tax totals, round-off, and Indian currency words.
 - Monthly history with usage totals, tax breakdowns, search, account/status filters, JSON backup, and invoice reprint/edit.
-- Cancel a generated invoice without deleting it; linked monthly usage is released so the same account can be billed again.
+- Cancel one invoice or several in bulk; every cancellation stores a mandatory reason, keeps the PI as void in records, and releases linked monthly usage so the same account can be billed again.
+- Delete a PI generated in error (or a pending credit-usage row) with a mandatory reason; the reason is written to the `billing_audit_log` table.
+- Mark a PI as Paid with an optional payment screenshot/receipt (drag & drop or local file picker) and optional UTR/payment notes.
+- Set pending credit usage to Paid Directly, Refused to Pay, Cancelled, or back to Pending; refusal/cancellation require a reason and paid entries accept the same drag-and-drop proof upload.
 - Repeat an existing invoice or use "Same Client" to start a fresh invoice for the current account.
 - Client directory, company/bank settings, and validation for GSTIN, PAN, IFSC, PIN, and state codes.
 - Mobile-first layout; tax breakdowns remain visible on small screens and in print.
@@ -75,7 +78,7 @@ PORT=8787
 ### 3. Set up the database
 
 - New project: run `supabase/schema.sql` in the Supabase SQL Editor.
-- Existing project: run every file in `supabase/migrations/` in order (`0001` through `0005`).
+- Existing project: run every file in `supabase/migrations/` in order (`0001` through `0006`).
 - Enable Email/Password auth and disable public sign-ups. Create users from the Supabase dashboard.
 
 `public/schema.sql` is a byte-identical copy used by the Settings modal's "Copy schema" helper.
@@ -112,8 +115,9 @@ Use this sequence to build and verify the application locally:
 2. Copy `.env.example` to `.env.local` and set the browser and server values.
 3. Construct the database:
    - New project: run `supabase/schema.sql`.
-   - Existing project: run `supabase/migrations/0001` through `0005` in order.
+   - Existing project: run `supabase/migrations/0001` through `0006` in order.
    - Migration `0005` adds safe invoice cancellation and usage release.
+   - Migration `0006` adds cancellation/payment-reason and proof columns, credit-usage status fields, and the `billing_audit_log` table.
 4. Start the API with `pnpm dev:server`, then the frontend with `pnpm dev`.
 5. Run the full verification gate before deployment:
 
@@ -158,7 +162,7 @@ lib/                     Types, config, API client, Supabase client, tax/PDF/CSV
 server/src/              Hono API (config, auth, rate limiting, routes, validation)
 server/dist/             Built API bundle (generated)
 supabase/schema.sql      Canonical schema (RLS read-only, triggers, indexes)
-supabase/migrations/     Incremental migrations 0001-0005
+supabase/migrations/     Incremental migrations 0001-0006
 public/schema.sql        Copy of the canonical schema for the UI helper
 public/_headers          Cloudflare Workers static-asset security and cache headers
 render.yaml              Render backend blueprint

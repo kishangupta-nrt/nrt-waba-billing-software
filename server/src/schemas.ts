@@ -69,7 +69,7 @@ export const InvoiceSchema = z
       .optional(),
     status: z.enum(['Draft', 'Sent', 'Paid', 'Cancelled']).optional(),
     cancellation_reason: z.string().max(1000).optional().default(''),
-    payment_proof_url: z.string().max(5000000).optional().default(''),
+    payment_proof_url: z.string().max(7000000).optional().default(''),
     payment_notes: z.string().max(1000).optional().default(''),
   })
   .strip()
@@ -111,6 +111,32 @@ export const InvoiceSchema = z
       });
     }
   });
+
+export const CancelInvoiceSchema = z
+  .object({
+    reason: z.string().trim().min(1, 'A cancellation reason is required').max(1000),
+  })
+  .strip();
+
+export const BulkCancelInvoicesSchema = z
+  .object({
+    ids: z.array(z.string().trim().min(1)).min(1).max(100),
+    reason: z.string().trim().min(1, 'A cancellation reason is required').max(1000),
+  })
+  .strip();
+
+export const PayInvoiceSchema = z
+  .object({
+    payment_proof_url: z.string().max(7000000).optional().default(''),
+    payment_notes: z.string().trim().max(1000).optional().default(''),
+  })
+  .strip();
+
+export const DeleteRecordSchema = z
+  .object({
+    reason: z.string().trim().min(1, 'A reason is required').max(1000),
+  })
+  .strip();
 
 export const ClientSchema = z
   .object({
@@ -181,7 +207,7 @@ export const MonthlyUsageSchema = z
     tax_mode: TaxModeSchema.optional().default('CGST_SGST'),
     status: z.enum(['pending', 'billed', 'paid', 'refused_to_pay', 'cancelled']).optional().default('pending'),
     status_reason: z.string().max(1000).optional().default(''),
-    payment_proof_url: z.string().max(5000000).optional().default(''),
+    payment_proof_url: z.string().max(7000000).optional().default(''),
     due_date: optionalDateSchema,
   })
   .strip();

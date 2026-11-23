@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS invoices (
 
   billing_month TEXT,
   status TEXT DEFAULT 'Sent' CHECK (status IN ('Draft', 'Sent', 'Paid', 'Cancelled')),
+  cancellation_reason TEXT,
+  payment_proof_url TEXT,
+  payment_notes TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -104,10 +107,25 @@ CREATE TABLE IF NOT EXISTS monthly_credit_usage (
   billed_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
   tax_mode TEXT NOT NULL DEFAULT 'CGST_SGST' CHECK (tax_mode IN ('CGST_SGST', 'IGST')),
   billed BOOLEAN DEFAULT FALSE,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'billed', 'paid', 'refused_to_pay', 'cancelled')),
+  status_reason TEXT,
+  payment_proof_url TEXT,
   invoice_voucher_no TEXT,
   invoice_id TEXT,
   due_date TEXT,
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 4b. Audit trail for reason-bearing actions ----------------------------------
+CREATE TABLE IF NOT EXISTS billing_audit_log (
+  id TEXT PRIMARY KEY,
+  action TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  reason TEXT,
+  details JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- Remove duplicate invoice-linked usage rows left by earlier versions before
@@ -134,6 +152,7 @@ CREATE INDEX IF NOT EXISTS idx_invoices_invoice_date ON invoices (invoice_date);
 CREATE INDEX IF NOT EXISTS idx_usage_month_year ON monthly_credit_usage (month, year);
 CREATE INDEX IF NOT EXISTS idx_usage_client_id ON monthly_credit_usage (client_id);
 CREATE INDEX IF NOT EXISTS idx_clients_name ON clients (name);
+CREATE INDEX IF NOT EXISTS idx_audit_entity ON billing_audit_log (entity_type, entity_id);
 
 -- 5. Row Level Security: read-only for authenticated users -------------------
 -- The Render backend uses the service-role key (bypasses RLS) for all writes.
@@ -142,6 +161,7 @@ ALTER TABLE company_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE clients ENABLE ROW LEVEL SECURITY;
 ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE monthly_credit_usage ENABLE ROW LEVEL SECURITY;
+ALTER TABLE billing_audit_log ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Authenticated access to company_settings" ON company_settings;
 DROP POLICY IF EXISTS "Authenticated access to clients" ON clients;
@@ -159,6 +179,8 @@ DROP POLICY IF EXISTS "Authenticated read company_settings" ON company_settings;
 DROP POLICY IF EXISTS "Authenticated read clients" ON clients;
 DROP POLICY IF EXISTS "Authenticated read invoices" ON invoices;
 DROP POLICY IF EXISTS "Authenticated read monthly_credit_usage" ON monthly_credit_usage;
+DROP POLICY IF EXISTS "Authenticated read billing_audit_log" ON billing_audit_log;
+DROP POLICY IF EXISTS "Allow public all" ON billing_audit_log;
 
 CREATE POLICY "Authenticated read company_settings"
   ON company_settings FOR SELECT TO authenticated USING (true);
@@ -168,6 +190,8 @@ CREATE POLICY "Authenticated read invoices"
   ON invoices FOR SELECT TO authenticated USING (true);
 CREATE POLICY "Authenticated read monthly_credit_usage"
   ON monthly_credit_usage FOR SELECT TO authenticated USING (true);
+CREATE POLICY "Authenticated read billing_audit_log"
+  ON billing_audit_log FOR SELECT TO authenticated USING (true);
 
 -- 6. Initial company settings (no sample clients or fabricated invoices) -----
 INSERT INTO company_settings (id, company_name, gstin, state_name, state_code, pan, voucher_prefix, current_voucher_seq)
@@ -282,6 +306,9 @@ BEGIN
     SET invoice_id = NULL,
         invoice_voucher_no = NULL,
         billed = FALSE,
+        status = 'pending',
+        status_reason = NULL,
+        payment_proof_url = NULL,
         updated_at = NOW()
     WHERE invoice_id = OLD.id;
     RETURN OLD;
@@ -294,6 +321,9 @@ BEGIN
     SET invoice_id = NULL,
         invoice_voucher_no = NULL,
         billed = FALSE,
+        status = 'pending',
+        status_reason = NULL,
+        payment_proof_url = NULL,
         updated_at = NOW()
     WHERE invoice_id = NEW.id;
     RETURN NEW;
@@ -362,6 +392,9 @@ BEGIN
         billed_amount = NEW.total_amount,
         tax_mode = NEW.tax_mode,
         billed = TRUE,
+        status = 'billed',
+        status_reason = NULL,
+        payment_proof_url = NULL,
         invoice_voucher_no = NEW.voucher_no,
         invoice_id = NEW.id,
         due_date = NEW.due_date,
@@ -371,12 +404,12 @@ BEGIN
     INSERT INTO monthly_credit_usage (
       id, client_id, client_name, month, year,
       utility_credits, marketing_credits, service_credits, auth_credits,
-      total_credits, rate_applied, billed_amount, tax_mode, billed,
+      total_credits, rate_applied, billed_amount, tax_mode, billed, status,
       invoice_voucher_no, invoice_id, due_date, updated_at
     ) VALUES (
       'usage_' || NEW.id, NEW.client_id, NEW.buyer_name, v_month, v_year,
       NEW.total_quantity, 0, 0, 0,
-      NEW.total_quantity, ROUND(v_rate, 4), NEW.total_amount, NEW.tax_mode, TRUE,
+      NEW.total_quantity, ROUND(v_rate, 4), NEW.total_amount, NEW.tax_mode, TRUE, 'billed',
       NEW.voucher_no, NEW.id, NEW.due_date, NOW()
     )
     ON CONFLICT (invoice_id) WHERE invoice_id IS NOT NULL DO UPDATE SET
@@ -390,6 +423,9 @@ BEGIN
       billed_amount = EXCLUDED.billed_amount,
       tax_mode = EXCLUDED.tax_mode,
       billed = TRUE,
+      status = 'billed',
+      status_reason = NULL,
+      payment_proof_url = NULL,
       invoice_voucher_no = EXCLUDED.invoice_voucher_no,
       due_date = EXCLUDED.due_date,
       updated_at = NOW();

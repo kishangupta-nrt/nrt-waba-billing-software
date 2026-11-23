@@ -4,6 +4,13 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'WABA Billing System - Newrise Technosys',
   description: 'WhatsApp Business API Proforma & Tax Invoice Generator with Bulk Processing, GST (IGST/CGST), and Monthly Credits History',
+  icons: {
+    icon: [
+      { url: '/favicon.ico', sizes: '16x16', type: 'image/x-icon' },
+      { url: '/icon.svg', type: 'image/svg+xml' },
+    ],
+    apple: '/icon.svg',
+  },
 };
 
 export default function RootLayout({

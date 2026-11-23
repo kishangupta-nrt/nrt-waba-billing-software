@@ -13,6 +13,8 @@ const BAD_REQUEST_CODES = new Set([
   '23514', // check constraint
   '23502', // not null
   'PGRST204', // column not found in schema cache
+  'PGRST205', // table not found in schema cache
+  '42P01', // undefined_table
   '42703', // undefined column
   'PGRST100', // failed to parse query
   'PGRST102', // invalid request body
@@ -23,6 +25,14 @@ export function fail(c: Context, error: unknown) {
 
   // Log full details server-side only.
   console.error('[api:error]', err.code || '-', err.message || error, err.details || '');
+
+  if (err.code === 'PGRST205' || err.code === '42P01') {
+    return c.json({
+      success: false,
+      error: 'Database tables not initialized. Please run schema.sql in Supabase SQL editor.',
+      code: err.code
+    }, 503);
+  }
 
   if (err.code === '23505') {
     return c.json({ success: false, error: 'Duplicate record (unique constraint violated)' }, 409);

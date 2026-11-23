@@ -130,15 +130,19 @@ export const db = {
     return invoice;
   },
 
-  async cancelInvoice(id: string): Promise<Invoice> {
-    if (isApiEnabled()) return api.cancelInvoice(id);
+  async cancelInvoice(id: string, reason?: string): Promise<Invoice> {
+    if (isApiEnabled()) return api.cancelInvoice(id, reason);
     requireProductionApi();
 
     const invoices = getLocal<Invoice[]>(INVOICES_KEY, []);
     const idx = invoices.findIndex(i => i.id === id);
     if (idx < 0) throw new ApiError('Invoice not found', 404);
     const updated = [...invoices];
-    updated[idx] = { ...updated[idx], status: 'Cancelled' };
+    updated[idx] = {
+      ...updated[idx],
+      status: 'Cancelled',
+      cancellation_reason: reason || 'Cancelled by user',
+    };
     setLocal(INVOICES_KEY, updated);
 
     const usage = getLocal<MonthlyCreditUsage[]>(USAGE_KEY, []).map(record =>
@@ -154,6 +158,16 @@ export const db = {
     );
     setLocal(USAGE_KEY, usage);
     return updated[idx];
+  },
+
+  async deleteInvoice(id: string): Promise<void> {
+    if (isApiEnabled()) {
+      await api.deleteInvoice(id);
+      return;
+    }
+    requireProductionApi();
+    const invoices = getLocal<Invoice[]>(INVOICES_KEY, []).filter(i => i.id !== id);
+    setLocal(INVOICES_KEY, invoices);
   },
 
   async saveInvoicesBatch(newInvoices: Invoice[]): Promise<Invoice[]> {
@@ -203,5 +217,15 @@ export const db = {
     getLocal<MonthlyCreditUsage[]>(USAGE_KEY, []).forEach(u => map.set(u.id, u));
     records.forEach(u => map.set(u.id, u));
     setLocal(USAGE_KEY, Array.from(map.values()));
+  },
+
+  async deleteMonthlyUsage(id: string): Promise<void> {
+    if (isApiEnabled()) {
+      await api.deleteMonthlyUsage(id);
+      return;
+    }
+    requireProductionApi();
+    const all = getLocal<MonthlyCreditUsage[]>(USAGE_KEY, []).filter(u => u.id !== id);
+    setLocal(USAGE_KEY, all);
   },
 };

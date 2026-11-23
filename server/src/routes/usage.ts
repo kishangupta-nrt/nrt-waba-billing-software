@@ -117,7 +117,10 @@ usage.post('/', async (c) => {
       rate_applied: Number(input.rate_applied || 0.365),
       billed_amount: calculateBilledAmount(totalCredits, Number(input.rate_applied || 0.365), input.tax_mode),
       tax_mode: input.tax_mode,
-      billed: false,
+      billed: input.status === 'billed' || false,
+      status: input.status || 'pending',
+      status_reason: input.status_reason || null,
+      payment_proof_url: input.payment_proof_url || null,
       invoice_voucher_no: null,
       invoice_id: null,
       due_date: input.due_date || null,
@@ -132,4 +135,13 @@ usage.post('/', async (c) => {
 
   if (error) return fail(c, error);
   return c.json({ success: true, data: isBatch ? data : data?.[0], count: rows.length });
+});
+
+usage.delete('/:id', async (c) => {
+  const id = c.req.param('id');
+  if (!id) return c.json({ success: false, error: 'Usage id is required' }, 400);
+
+  const { error } = await supabaseAdmin.from('monthly_credit_usage').delete().eq('id', id);
+  if (error) return fail(c, error);
+  return c.json({ success: true, id });
 });

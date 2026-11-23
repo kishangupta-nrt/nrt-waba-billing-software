@@ -94,6 +94,9 @@ export interface Invoice {
   
   billing_month?: string; // e.g. "October 2026"
   status: 'Draft' | 'Sent' | 'Paid' | 'Cancelled';
+  cancellation_reason?: string;
+  payment_proof_url?: string;
+  payment_notes?: string;
   created_at?: string;
 }
 
@@ -112,6 +115,9 @@ export interface MonthlyCreditUsage {
   billed_amount: number;
   tax_mode: TaxMode;
   billed: boolean;
+  status?: 'pending' | 'billed' | 'paid' | 'refused_to_pay' | 'cancelled';
+  status_reason?: string;
+  payment_proof_url?: string;
   invoice_voucher_no?: string;
   invoice_id?: string;
   due_date?: string;

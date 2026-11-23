@@ -68,6 +68,9 @@ export const InvoiceSchema = z
       .regex(/^[A-Z][a-z]+ \d{4}$/, 'billing_month must look like "November 2026"')
       .optional(),
     status: z.enum(['Draft', 'Sent', 'Paid', 'Cancelled']).optional(),
+    cancellation_reason: z.string().max(1000).optional().default(''),
+    payment_proof_url: z.string().max(5000000).optional().default(''),
+    payment_notes: z.string().max(1000).optional().default(''),
   })
   .strip()
   .superRefine((value, ctx) => {
@@ -176,6 +179,9 @@ export const MonthlyUsageSchema = z
     total_credits: z.coerce.number().nonnegative().finite().optional().default(0),
     rate_applied: z.coerce.number().nonnegative().finite().optional().default(0.365),
     tax_mode: TaxModeSchema.optional().default('CGST_SGST'),
+    status: z.enum(['pending', 'billed', 'paid', 'refused_to_pay', 'cancelled']).optional().default('pending'),
+    status_reason: z.string().max(1000).optional().default(''),
+    payment_proof_url: z.string().max(5000000).optional().default(''),
     due_date: optionalDateSchema,
   })
   .strip();

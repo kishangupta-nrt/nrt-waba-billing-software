@@ -125,11 +125,24 @@ function BillingDashboard() {
     await loadData();
   };
 
-  const handleCancelInvoice = async (invoice: Invoice) => {
-    await db.cancelInvoice(invoice.id);
+  const handleCancelInvoice = async (invoice: Invoice, reason?: string) => {
+    await db.cancelInvoice(invoice.id, reason);
     if (selectedInvoiceForEdit?.id === invoice.id) {
       setSelectedInvoiceForEdit(null);
     }
+    await loadData();
+  };
+
+  const handleDeleteInvoice = async (invoice: Invoice) => {
+    await db.deleteInvoice(invoice.id);
+    if (selectedInvoiceForEdit?.id === invoice.id) {
+      setSelectedInvoiceForEdit(null);
+    }
+    await loadData();
+  };
+
+  const handleDeleteUsage = async (id: string) => {
+    await db.deleteMonthlyUsage(id);
     await loadData();
   };
 
@@ -362,6 +375,8 @@ function BillingDashboard() {
             }}
             onRepeatInvoice={handleRepeatInvoice}
             onCancelInvoice={handleCancelInvoice}
+            onDeleteInvoice={handleDeleteInvoice}
+            onDeleteUsage={handleDeleteUsage}
           />
         )}
 

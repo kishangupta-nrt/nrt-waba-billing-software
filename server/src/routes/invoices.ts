@@ -174,6 +174,13 @@ invoices.post('/:id/cancel', async (c) => {
   const id = c.req.param('id');
   if (!id) return c.json({ success: false, error: 'Invoice id is required' }, 400);
 
+  let body: { reason?: string } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    // Body is optional
+  }
+
   const { data: existing, error: fetchError } = await supabaseAdmin
     .from('invoices')
     .select('*')
@@ -186,11 +193,29 @@ invoices.post('/:id/cancel', async (c) => {
 
   const { data, error } = await supabaseAdmin
     .from('invoices')
-    .update({ status: 'Cancelled' })
+    .update({
+      status: 'Cancelled',
+      cancellation_reason: body.reason || 'Cancelled by user',
+    })
     .eq('id', id)
     .select()
     .maybeSingle();
 
   if (error) return fail(c, error);
   return c.json({ success: true, data });
+});
+
+invoices.delete('/:id', async (c) => {
+  const id = c.req.param('id');
+  if (!id) return c.json({ success: false, error: 'Invoice id is required' }, 400);
+
+  // Release any monthly usage linked to this invoice
+  await supabaseAdmin
+    .from('monthly_credit_usage')
+    .update({ billed: false, invoice_id: null, invoice_voucher_no: null })
+    .eq('invoice_id', id);
+
+  const { error } = await supabaseAdmin.from('invoices').delete().eq('id', id);
+  if (error) return fail(c, error);
+  return c.json({ success: true, id });
 });
